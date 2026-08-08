@@ -843,6 +843,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
   const [step, setStep] = useState<WardrobeStep>("category");
   const [category, setCategory] = useState<"top" | "bottom">("top");
   const [preview, setPreview] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false); // 🆕 新增上傳中狀態
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -855,6 +856,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
         setCategory("top");
       }
       setPreview(null);
+      setIsUploading(false);
     }
   }, [open, initialCategory]);
 
@@ -865,19 +867,39 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
     setPreview(url);
   }
 
-  function handleConfirm() {
-    if (!preview) return;
-    const allColors = ANALYSIS_PRESETS.flatMap(p => p.colors);
-    const dominantColor = allColors[Math.floor(Math.random() * allColors.length)];
-    const result: WardrobeItem = {
-      id: Date.now(),
-      date: new Date().toISOString().slice(0, 10),
-      imageUrl: preview,
-      category,
-      dominantColor,
-    };
-    onComplete(result);
-    onClose();
+  // 🆕 修改為非同步函數，並呼叫後端 API
+  async function handleConfirm() {
+    if (!preview || !fileRef.current?.files?.[0]) return;
+    
+    const file = fileRef.current.files[0];
+    setIsUploading(true); // 開啟上傳中狀態
+    
+    try {
+      // 呼叫後端上傳 API
+      const result = await api.addWardrobeItem(file, category);
+      
+      if (result.success) {
+        // 將後端回傳的資料轉換為前端需要的 WardrobeItem 格式
+        const newItem: WardrobeItem = {
+          id: result.data.item_id,
+          date: new Date().toISOString().slice(0, 10),
+          imageUrl: `http://127.0.0.1:5000${result.data.image_url}`, // 組合完整圖片網址
+          category: result.data.tag as "top" | "bottom",
+          // 若有顏色則取第一主色，否則給預設值
+          dominantColor: result.data.colors[0] ? `rgb(${result.data.colors[0]})` : '#C4856A',
+        };
+        
+        onComplete(newItem);
+        onClose();
+      } else {
+        alert("上傳失敗：" + (result.message || "未知錯誤"));
+      }
+    } catch (error) {
+      console.error(error);
+      alert("上傳發生錯誤，請確認後端是否已啟動");
+    } finally {
+      setIsUploading(false);
+    }
   }
 
   return (
@@ -887,7 +909,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
           <motion.div key="bd" className="absolute inset-0 z-20"
             style={{ background: "rgba(44,24,16,0.5)", backdropFilter: "blur(3px)" }}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={step === "category" ? onClose : undefined} />
+            onClick={(step === "category" && !isUploading) ? onClose : undefined} />
 
           <motion.div key="sh" className="absolute bottom-0 left-0 right-0 z-30 rounded-t-3xl overflow-hidden max-h-[85vh] flex flex-col"
             style={{ background: "#FDFAF6" }}
@@ -908,7 +930,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                     {step === "category" ? "Choose Category" : "Upload Photo"}
                   </p>
                 </div>
-                {step === "category" && (
+                {step === "category" && !isUploading && (
                   <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "rgba(44,24,16,0.07)" }}>
                     <X size={15} color="#8A6F5E" strokeWidth={2} />
                   </button>
@@ -948,8 +970,8 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
               {step === "pick" && (
                 <div className="flex flex-col gap-5">
                   <button
-                    onClick={() => fileRef.current?.click()}
-                    className="w-full rounded-2xl flex flex-col items-center justify-center transition-opacity active:opacity-70 overflow-hidden"
+                    onClick={() => !isUploading && fileRef.current?.click()}
+                    className="w-full rounded-2xl flex flex-col items-center justify-center transition-opacity active:opacity-70 overflow-hidden relative"
                     style={{
                       height: 220,
                       background: preview ? "transparent" : "#EDE4D8",
@@ -957,7 +979,14 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                     }}
                   >
                     {preview ? (
-                      <img src={preview} alt="preview" className="w-full h-full object-cover rounded-2xl" />
+                      <>
+                        <img src={preview} alt="preview" className={`w-full h-full object-cover rounded-2xl ${isUploading ? 'opacity-50' : ''}`} />
+                        {isUploading && (
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <span className="px-4 py-2 rounded-xl bg-black/60 text-white text-sm tracking-widest">去背分析中...</span>
+                          </div>
+                        )}
+                      </>
                     ) : (
                       <div className="flex flex-col items-center gap-3">
                         <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ background: "rgba(139,58,82,0.12)" }}>
@@ -975,11 +1004,13 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                   <div className="flex gap-3">
                     <button
                       onClick={() => {
+                        if (isUploading) return;
                         if (preview) { setPreview(null); if (fileRef.current) fileRef.current.value = ""; }
                         else if (initialCategory) onClose();
                         else setStep("category");
                       }}
-                      className="flex-1 rounded-xl py-3 active:opacity-70 transition-opacity"
+                      disabled={isUploading}
+                      className="flex-1 rounded-xl py-3 active:opacity-70 transition-opacity disabled:opacity-50"
                       style={{ background: "rgba(44,24,16,0.07)" }}
                     >
                       <span className="text-sm" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
@@ -989,12 +1020,13 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                     {preview && (
                       <button
                         onClick={handleConfirm}
-                        className="flex-1 rounded-xl py-3 flex items-center justify-center gap-2 active:opacity-70 transition-opacity"
+                        disabled={isUploading}
+                        className="flex-1 rounded-xl py-3 flex items-center justify-center gap-2 active:opacity-70 transition-opacity disabled:opacity-50"
                         style={{ background: "linear-gradient(135deg, #8B3A52 0%, #6B2A40 100%)" }}
                       >
-                        <CheckCircle size={15} color="#FDFAF6" strokeWidth={1.8} />
+                        {!isUploading && <CheckCircle size={15} color="#FDFAF6" strokeWidth={1.8} />}
                         <span className="text-sm tracking-wide" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 400, color: "#FDFAF6" }}>
-                          新增{category === "top" ? "上衣" : "下著"}
+                          {isUploading ? "處理中..." : `新增${category === "top" ? "上衣" : "下著"}`}
                         </span>
                       </button>
                     )}
@@ -2298,14 +2330,12 @@ export default function App() {
   const [selectedColor, setSelectedColor] = useState<string | undefined>(undefined);
   const [selectedMode, setSelectedMode] = useState<SuggestionMode | undefined>(undefined);
 
-  // 🆕 1. 網頁初次載入時，檢查是否有暫存的登入狀態與 Token
   useEffect(() => {
     const token = localStorage.getItem('pca_jwt_token');
     const savedUser = localStorage.getItem('pca_user');
 
     if (token && savedUser) {
       try {
-        // 如果兩者都在，代表已經登入過了，直接恢復狀態並跳轉首頁
         setUser(JSON.parse(savedUser));
         setScreen("home");
       } catch (e) {
@@ -2313,6 +2343,34 @@ export default function App() {
       }
     }
   }, []);
+
+  // 🆕 當使用者登入成功，從後端取得衣櫥資料
+  useEffect(() => {
+    if (user) {
+      loadWardrobeData();
+    } else {
+      setWardrobe([]); // 若登出則清空衣櫥
+    }
+  }, [user]);
+
+  // 🆕 從後端獲取衣櫥清單
+  async function loadWardrobeData() {
+    try {
+      const result = await api.getWardrobe();
+      if (result.success) {
+        const mappedItems: WardrobeItem[] = result.data.map((item: any) => ({
+          id: item.item_id,
+          date: new Date().toISOString().slice(0, 10), // 使用今日日期，或從後端撈取
+          imageUrl: `http://127.0.0.1:5000${item.image_url}`,
+          category: item.tag,
+          dominantColor: item.colors[0] ? `rgb(${item.colors[0]})` : '#C4856A'
+        }));
+        setWardrobe(mappedItems);
+      }
+    } catch (e) {
+      console.error("無法載入衣櫥資料", e);
+    }
+  }
 
   function navigate(to: Screen) {
     setHistory((h) => [...h, screen]);
@@ -2324,28 +2382,21 @@ export default function App() {
     if (prev !== undefined) { setHistory((h) => h.slice(0, -1)); setScreen(prev); }
   }
 
-  // 🆕 2. 登入成功時，將 user 資訊存入 localStorage
   function handleLogin(user: UserAccount) {
     localStorage.setItem('pca_user', JSON.stringify(user));
     setUser(user);
     setScreen("home");
   }
 
-  // 🆕 3. 登出時，將 pca_user 一併移除乾淨
   async function handleUserClick() {
     if (user) {
       try {
-        // 1. 戳後端登出 API (通知後端將此 Token 列入黑名單或處理相關邏輯)
         await api.logout();
       } catch (error) {
         console.error("後端登出 API 呼叫失敗", error);
       } finally {
-        // 2. 這是最重要的一步：徹底清空前端瀏覽器暫存的 JWT Token 與使用者資料
         localStorage.removeItem('pca_jwt_token');
         localStorage.removeItem('pca_user');
-        
-        console.log("已清除本地暫存的 JWT Token 與使用者資料，並導回登入頁面。", localStorage.getItem('pca_jwt_token'), localStorage.getItem('pca_user'));
-        // 3. 清空 React 狀態並導回登入頁面
         setUser(null); 
         setScreen("auth"); 
       }
@@ -2353,19 +2404,27 @@ export default function App() {
   }
 
   function addAnalysis(a: ColorAnalysis) {
-    setAnalyses((prev) => [a, ...prev]); // newest at top
+    setAnalyses((prev) => [a, ...prev]); 
   }
 
   function deleteAnalysis(id: number) {
     setAnalyses((prev) => prev.filter((a) => a.id !== id));
   }
 
+  // 前端狀態更新（圖片上傳完成後呼叫）
   function addWardrobeItem(item: WardrobeItem) {
-    setWardrobe((prev) => [item, ...prev]); // newest at top
+    setWardrobe((prev) => [item, ...prev]); 
   }
 
-  function deleteWardrobeItem(id: number) {
-    setWardrobe((prev) => prev.filter((item) => item.id !== id));
+  // 🆕 刪除衣物時同步刪除資料庫與本機圖片
+  async function deleteWardrobeItem(id: number) {
+    try {
+      await api.dropWardrobeItem(id);
+      setWardrobe((prev) => prev.filter((item) => item.id !== id));
+    } catch (e) {
+      console.error("刪除衣物失敗", e);
+      alert("刪除失敗，請檢查網路連線");
+    }
   }
 
   function handleColorClick(color: string) {
@@ -2373,28 +2432,24 @@ export default function App() {
     navigate("color-suggestion");
   }
 
-  // Clear selected color when navigating to color-suggestion from home
   function navigateToColorSuggestion() {
     setSelectedColor(undefined);
     setSelectedMode(undefined);
     navigate("color-suggestion");
   }
 
-  // Navigate to personal color mode from analysis image
   function handleAnalysisImageClick() {
     setSelectedColor(undefined);
     setSelectedMode("personal");
     navigate("color-suggestion");
   }
 
-  // Navigate to top mode from wardrobe top image
   function handleTopImageClick() {
     setSelectedColor(undefined);
     setSelectedMode("top");
     navigate("color-suggestion");
   }
 
-  // Navigate to bottom mode from wardrobe bottom image
   function handleBottomImageClick() {
     setSelectedColor(undefined);
     setSelectedMode("bottom");
