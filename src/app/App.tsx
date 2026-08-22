@@ -79,51 +79,6 @@ interface WardrobeItem {
   dominantColor: string;      // 主要顏色 (HEX 格式，由系統模擬產生)
 }
 
-// ─── Analysis presets (randomly assigned on each new analysis) ────────────────
-// 色彩分析預設資料 (每次新分析時隨機分配)
-
-/**
- * ANALYSIS_PRESETS - 色彩分析預設資料
- *
- * 包含四種季節色型的預設資料：
- * - 秋季暖色型 (深秋型)
- * - 春季暖色型 (亮春型)
- * - 夏季冷色型 (柔夏型)
- * - 冬季冷色型 (純冬型)
- *
- * 每個預設包含：
- * - season: 季節色型名稱
- * - type: 具體類型
- * - colors: 適合的顏色陣列 (6 種顏色)
- * - description: 適合該色型的說明
- */
-const ANALYSIS_PRESETS = [
-  {
-    season: "秋季暖色型",
-    type: "深秋型",
-    colors: ["#C4856A", "#8B3A52", "#D4956B", "#6B4C3B", "#E8C9A0", "#A0522D"],
-    description: "膚色偏暖黃調，適合大地、橘棕、深莓色系，建議避免冷調粉藍。",
-  },
-  {
-    season: "春季暖色型",
-    type: "亮春型",
-    colors: ["#F9CBA5", "#F4A261", "#E76F51", "#FFCBA4", "#FDE68A", "#FBBF24"],
-    description: "膚色明亮帶黃，適合珊瑚橘、杏黃、溫暖橙調，充滿活力感。",
-  },
-  {
-    season: "夏季冷色型",
-    type: "柔夏型",
-    colors: ["#A9C4D4", "#B0C4DE", "#C3B1D0", "#E8C5D0", "#D8E4F0", "#9BAFC5"],
-    description: "膚色偏冷粉白，適合粉霧藍、莫蘭迪紫、淺玫瑰，優雅而柔和。",
-  },
-  {
-    season: "冬季冷色型",
-    type: "純冬型",
-    colors: ["#8B3A52", "#2C1810", "#A9C4D4", "#5B4A6A", "#C0C0C0", "#1A1A2E"],
-    description: "膚色偏冷瓷白，適合純黑、深酒紅、冰藍，高對比最顯氣勢。",
-  },
-];
-
 // ─── Color palette generation ────────────────────────────────────────────────
 // 配色方案生成工具函數
 
@@ -146,36 +101,6 @@ function hexToRgb(hex: string): [number, number, number] {
  */
 function rgbToHex(r: number, g: number, b: number): string {
   return "#" + [r, g, b].map(x => Math.round(x).toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * adjustColor - 調整顏色的亮度和飽和度
- * @param hex - 原始 HEX 顏色
- * @param lightness - 亮度調整值 (-255 到 255)
- * @param saturation - 飽和度倍數 (預設為 1)
- * @returns 調整後的 HEX 顏色
- */
-function adjustColor(hex: string, lightness: number, saturation: number = 1): string {
-  const [r, g, b] = hexToRgb(hex);
-  const nr = Math.min(255, Math.max(0, r + lightness)) * saturation;
-  const ng = Math.min(255, Math.max(0, g + lightness)) * saturation;
-  const nb = Math.min(255, Math.max(0, b + lightness)) * saturation;
-  return rgbToHex(nr, ng, nb);
-}
-
-/**
- * generatePalette - 根據基礎色生成配色方案
- * @param baseColor - 基礎顏色 (HEX 格式)
- * @returns 包含 4 種顏色的配色陣列
- *
- * 生成規則：
- * - 顏色 1: 原色
- * - 顏色 2: 較亮的變體 (+40)
- * - 顏色 3: 較暗的變體 (-30)
- * - 顏色 4: 更亮的變體 (+80)
- */
-function generatePalette(baseColor: string): string[] {
-  return [baseColor, adjustColor(baseColor, 40), adjustColor(baseColor, -30), adjustColor(baseColor, 80)];
 }
 
 /**
@@ -597,32 +522,62 @@ function AddAnalysisModal({ open, onClose, onComplete }: {
     setPreview(url);
   }
 
-  const startAnalysis = useCallback(() => {
-    setStep("analyzing");
-    setProgress(0);
-    let p = 0;
-    intervalRef.current = setInterval(() => {
-      // Irregular progress to feel organic
-      const jump = Math.random() * 12 + 3;
-      p = Math.min(p + jump, 100);
-      setProgress(Math.round(p));
-      if (p >= 100) {
-        clearInterval(intervalRef.current!);
-        setStep("done");
-        setTimeout(() => {
-          const preset = ANALYSIS_PRESETS[Math.floor(Math.random() * ANALYSIS_PRESETS.length)];
-          const result: ColorAnalysis = {
-            id: Date.now(),
-            date: new Date().toISOString().slice(0, 10),
-            imageUrl: preview!,
-            ...preset,
-          };
-          onComplete(result);
-          onClose();
-        }, 900);
-      }
-    }, 160);
-  }, [preview, onComplete, onClose]);
+  // 於 AddAnalysisModal 組件內部
+const startAnalysis = useCallback(async () => {
+  if (!fileRef.current?.files?.[0]) return;
+  const file = fileRef.current.files[0];
+
+  setStep("analyzing");
+  setProgress(0);
+
+  // 視覺進度條：讓進度跑到 90% 營造努力分析中的感覺，並等待後端 API 回應
+  let p = 0;
+  intervalRef.current = setInterval(() => {
+    p = Math.min(p + (Math.random() * 10 + 2), 90);
+    setProgress(Math.round(p));
+  }, 200);
+
+  try {
+    // 呼叫後端 API
+    const response = await api.analyzePersonalColor(file);
+
+    clearInterval(intervalRef.current!);
+    setProgress(100); // 取得結果後，直接拉滿到 100%
+
+    if (response.success) {
+      setStep("done");
+      const backendData = response.data;
+      
+      setTimeout(() => {
+        // 將後端的資料結構 Mapping 到前端定義的 ColorAnalysis 介面
+        const newAnalysis: ColorAnalysis = {
+          id: backendData.analysis_id, // 從資料庫取得的 ID
+          date: new Date().toISOString().slice(0, 10),
+          imageUrl: `http://127.0.0.1:5000${backendData.image_url}`, // 組合完整圖片網址
+          season: backendData.season_zh, // 例如：秋季
+          type: backendData.label_12_zh, // 例如：暖秋型
+          colors: [
+            // 取出後端特徵萃取的代表色作為色票
+            backendData.representative_colors.skin || "#FFFFFF",
+            backendData.representative_colors.lip || "#FFFFFF",
+            backendData.representative_colors.hair || "#FFFFFF",
+            backendData.representative_colors.iris || "#FFFFFF",
+          ],
+          description: "根據您的臉部特徵，系統分析出了最適合您的專屬色彩！",
+        };
+        onComplete(newAnalysis);
+        onClose();
+      }, 900);
+    } else {
+      alert("分析失敗：" + (response.message || "未知錯誤"));
+      onClose();
+    }
+  } catch (error) {
+    clearInterval(intervalRef.current!);
+    alert("伺服器連線失敗");
+    onClose();
+  }
+}, [preview, onComplete, onClose]);
 
   const progressColor = "linear-gradient(90deg, #C4856A 0%, #8B3A52 100%)";
 
@@ -868,25 +823,30 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
   }
 
   // 🆕 修改為非同步函數，並呼叫後端 API
+  // 在 AddWardrobeModal 組件中
   async function handleConfirm() {
     if (!preview || !fileRef.current?.files?.[0]) return;
     
     const file = fileRef.current.files[0];
-    setIsUploading(true); // 開啟上傳中狀態
+    setIsUploading(true); 
     
     try {
-      // 呼叫後端上傳 API
       const result = await api.addWardrobeItem(file, category);
       
       if (result.success) {
-        // 將後端回傳的資料轉換為前端需要的 WardrobeItem 格式
+        // 將後端傳來的 "42,42,44" 字串轉成 HEX
+        let hexColor = '#C4856A'; // 預設色
+        if (result.data.colors[0]) {
+          const [r, g, b] = result.data.colors[0].split(',').map(Number);
+          hexColor = rgbToHex(r, g, b);
+        }
+
         const newItem: WardrobeItem = {
           id: result.data.item_id,
           date: new Date().toISOString().slice(0, 10),
-          imageUrl: `http://127.0.0.1:5000${result.data.image_url}`, // 組合完整圖片網址
+          imageUrl: `http://127.0.0.1:5000${result.data.image_url}`, 
           category: result.data.tag as "top" | "bottom",
-          // 若有顏色則取第一主色，否則給預設值
-          dominantColor: result.data.colors[0] ? `rgb(${result.data.colors[0]})` : '#C4856A',
+          dominantColor: hexColor, // 改為存入 HEX
         };
         
         onComplete(newItem);
@@ -1295,7 +1255,7 @@ function AnalysisRow({ item, onDelete, onColorClick, onImageClick, isNew }: {
       <div className="flex flex-col justify-between flex-1 min-w-0 py-3 pr-0">
         {/* Season + date */}
         <div className="flex items-start justify-between gap-1 pr-3">
-          <p className="text-sm leading-tight" style={{ fontFamily: "'Playfair Display', serif", fontWeight: 500, color: "#2C1810" }}>{item.season}</p>
+          <p className="text-sm leading-tight" style={{ fontFamily: "'Playfair Display', serif", fontWeight: 500, color: "#2C1810" }}>{item.type}</p>
           <span className="text-xs shrink-0" style={{ fontFamily: "'DM Sans', sans-serif", color: "#C4A898" }}>{item.date.replace(/-/g, ".")}</span>
         </div>
 
@@ -1853,6 +1813,10 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
   const [selectedColor, setSelectedColor] = useState<string | null>(initialColor || null);
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null);
 
+  // 新增狀態來儲存從 API 拿回來的配色建議
+  const [recommendedPalettes, setRecommendedPalettes] = useState<string[]>([]);
+  const [isLoadingMatches, setIsLoadingMatches] = useState(false);
+
   const tops = wardrobe.filter(w => w.category === "top");
   const bottoms = wardrobe.filter(w => w.category === "bottom");
 
@@ -1872,20 +1836,57 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
     }
   }
 
+  // 當選擇衣物時，呼叫後端 API 取得配色建議
+  useEffect(() => {
+    async function fetchMatches() {
+      // 決定要交給大師分析的目標顏色
+      let targetColor = "";
+      if (mode === "personal" && selectedColor) {
+        targetColor = selectedColor;
+      } else if ((mode === "top" || mode === "bottom") && selectedItem) {
+        targetColor = selectedItem.dominantColor;
+      }
+
+      // 如果沒有選顏色，就清空推薦
+      if (!targetColor) {
+        setRecommendedPalettes([]);
+        return;
+      }
+
+      setIsLoadingMatches(true);
+      try {
+        const response = await api.getColorMatches(targetColor);
+        if (response.success && response.recommendations.length > 0) {
+          // 將 API 回傳的推薦顏色陣列存起來
+          const colors = response.recommendations.map((r: any) => r.color);
+          setRecommendedPalettes(colors);
+        } else {
+          setRecommendedPalettes([]);
+        }
+      } catch (error) {
+        console.error("取得配色建議失敗", error);
+        setRecommendedPalettes([]);
+      } finally {
+        setIsLoadingMatches(false);
+      }
+    }
+
+    fetchMatches();
+  }, [selectedItem, selectedColor, mode]); // 監聽這三個狀態的變化
+
   // Personal mode palette + matches
-  const personalPalette = selectedColor ? generatePalette(selectedColor) : [];
-  const personalMatchingTops = selectedColor ? tops.filter(t => isColorMatch(t.dominantColor, personalPalette)) : [];
-  const personalMatchingBottoms = selectedColor ? bottoms.filter(b => isColorMatch(b.dominantColor, personalPalette)) : [];
+  const personalMatchingTops = selectedColor ? tops.filter(t => isColorMatch(t.dominantColor, recommendedPalettes)) : [];
+  const personalMatchingBottoms = selectedColor ? bottoms.filter(b => isColorMatch(b.dominantColor, recommendedPalettes)) : [];
 
   // Wardrobe mode — palette from selected item, find complement
-  const itemPalette = selectedItem ? generatePalette(selectedItem.dominantColor) : [];
-  // top selected (主色) → find matching bottoms (配色)
+  // Wardrobe mode 邏輯更新：改用從 API 拿回來的 recommendedPalettes 去衣櫥裡尋找
+  // 如果 API 還在載入，或是 API 回傳空陣列（但有選定衣服），可以給一個空陣列，或是 fallback 到你原本的假資料
   const suggestedBottoms = (selectedItem && mode === "top")
-    ? bottoms.filter(b => isColorMatch(b.dominantColor, itemPalette))
+    ? bottoms.filter(b => isColorMatch(b.dominantColor, recommendedPalettes))
     : [];
-  // bottom selected (配色) → find matching tops (主色)
+    
   const suggestedTops = (selectedItem && mode === "bottom")
-    ? tops.filter(t => isColorMatch(t.dominantColor, itemPalette))
+    ? tops.filter(t => isColorMatch(t.dominantColor, recommendedPalettes))
     : [];
 
   const tabs: { id: SuggestionMode; label: string; sub: string }[] = [
@@ -1940,13 +1941,13 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                   <div className="rounded-2xl p-3 flex items-center gap-3"
                     style={{ background: "#FDFAF6", border: "1px solid rgba(44,24,16,0.08)" }}>
                     <div className="w-14 h-18 rounded-xl overflow-hidden shrink-0" style={{ background: "#EDE4D8", height: 68 }}>
-                      <img src={analysis.imageUrl} alt={analysis.season} className="w-full h-full object-cover" />
+                      <img src={analysis.imageUrl} alt={analysis.type} className="w-full h-full object-cover" />
                     </div>
                     <span className="text-base" style={{ fontFamily: "'Playfair Display', serif", fontWeight: 500, color: "#2C1810" }}>
-                      {analysis.season}
+                      {analysis.type}
                     </span>
                   </div>
-                  <div className="grid grid-cols-6 gap-2">
+                  <div className="grid grid-cols-4 gap-2">
                     {analysis.colors.map((color) => (
                       <motion.button
                         key={color}
@@ -1993,7 +1994,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
               {/* Palette */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>單色配色方案</p>
-                <ColorPaletteStrip palette={personalPalette} />
+                <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
               {/* Wardrobe matches */}
@@ -2090,7 +2091,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
               {/* Palette */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>配色方案</p>
-                <ColorPaletteStrip palette={itemPalette} />
+                <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
               {/* Suggested bottoms */}
@@ -2177,7 +2178,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
               {/* Palette */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>配色方案</p>
-                <ColorPaletteStrip palette={itemPalette} />
+                <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
               {/* Suggested tops */}
@@ -2344,27 +2345,59 @@ export default function App() {
     }
   }, []);
 
-  // 🆕 當使用者登入成功，從後端取得衣櫥資料
+  // 🆕 當使用者登入成功，從後端取得「衣櫥」與「分析紀錄」資料
   useEffect(() => {
     if (user) {
       loadWardrobeData();
+      loadAnalysesData(); // 呼叫載入分析紀錄
     } else {
-      setWardrobe([]); // 若登出則清空衣櫥
+      setWardrobe([]); 
+      setAnalyses([]); // 若登出則一併清空分析紀錄
     }
   }, [user]);
 
-  // 🆕 從後端獲取衣櫥清單
+  // 從後端獲取分析紀錄清單
+  async function loadAnalysesData() {
+    try {
+      const result = await api.getAnalyses();
+      if (result.success) {
+        const mappedAnalyses: ColorAnalysis[] = result.data.map((item: any) => ({
+          id: item.id,
+          date: item.date,
+          imageUrl: `http://127.0.0.1:5000${item.image_url}`,
+          season: item.season, // 接收後端的 "春(Spring)"
+          type: item.type,     // 接收後端的 "亮春型"
+          colors: item.colors, // 完全接收後端查出的色票陣列
+          description: item.description 
+        }));
+        setAnalyses(mappedAnalyses);
+      }
+    } catch (e) {
+      console.error("無法載入分析紀錄", e);
+    }
+  }
+
+  // 從後端獲取衣櫥清單
   async function loadWardrobeData() {
     try {
       const result = await api.getWardrobe();
       if (result.success) {
-        const mappedItems: WardrobeItem[] = result.data.map((item: any) => ({
-          id: item.item_id,
-          date: new Date().toISOString().slice(0, 10), // 使用今日日期，或從後端撈取
-          imageUrl: `http://127.0.0.1:5000${item.image_url}`,
-          category: item.tag,
-          dominantColor: item.colors[0] ? `rgb(${item.colors[0]})` : '#C4856A'
-        }));
+        const mappedItems: WardrobeItem[] = result.data.map((item: any) => {
+          // 將後端傳來的 "42,42,44" 字串轉成 HEX
+          let hexColor = '#C4856A'; // 預設色
+          if (item.colors[0]) {
+            const [r, g, b] = item.colors[0].split(',').map(Number);
+            hexColor = rgbToHex(r, g, b);
+          }
+
+          return {
+            id: item.item_id,
+            date: new Date().toISOString().slice(0, 10),
+            imageUrl: `http://127.0.0.1:5000${item.image_url}`,
+            category: item.tag,
+            dominantColor: hexColor // 改為存入 HEX
+          };
+        });
         setWardrobe(mappedItems);
       }
     } catch (e) {
@@ -2407,8 +2440,21 @@ export default function App() {
     setAnalyses((prev) => [a, ...prev]); 
   }
 
-  function deleteAnalysis(id: number) {
-    setAnalyses((prev) => prev.filter((a) => a.id !== id));
+  // 🆕 刪除個人色彩分析紀錄時，同步刪除資料庫與本機圖片
+  async function deleteAnalysis(id: number) {
+    try {
+      const response = await api.deleteAnalysis(id);
+      
+      if (response.success) {
+        // 後端刪除成功後，才將該筆資料從 React 畫面上移除
+        setAnalyses((prev) => prev.filter((a) => a.id !== id));
+      } else {
+        alert("刪除失敗：" + (response.message || "未知錯誤"));
+      }
+    } catch (e) {
+      console.error("刪除分析紀錄失敗", e);
+      alert("刪除失敗，請檢查網路連線");
+    }
   }
 
   // 前端狀態更新（圖片上傳完成後呼叫）

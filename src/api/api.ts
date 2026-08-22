@@ -71,5 +71,52 @@ export const api = {
       body: JSON.stringify({ clothes_id: clothesId })
     });
     return res.json();
-  }
+  },
+
+  // ─── 個人色彩分析系統-分析 ───
+  analyzePersonalColor: async (file: File) => {
+    const formData = new FormData();
+    formData.append('image', file);
+    
+    const res = await fetch(`${BASE_URL}/personal-color/analyze`, {
+      method: 'POST',
+      headers: { 
+        'Authorization': `Bearer ${localStorage.getItem('pca_jwt_token')}` 
+      },
+      body: formData // FormData 不需要手動設定 Content-Type
+    });
+    return res.json();
+  },
+  
+  // ─── 個人色彩分析系統-歷史紀錄 ───
+  getAnalyses: async () => {
+    const res = await fetch(`${BASE_URL}/personal-color/history`, {
+      method: 'GET', // 注意這裡是 GET
+      headers: getAuthHeaders()
+    });
+    return res.json();
+  },
+  // ─── 個人色彩分析系統-刪除紀錄 ───
+  deleteAnalysis: async (analysisId: number) => {
+    const res = await fetch(`${BASE_URL}/personal-color/delete-record`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        ...getAuthHeaders() 
+      },
+      body: JSON.stringify({ analysis_id: analysisId })
+    });
+    return res.json();
+  },
+
+  // ─── 配色建議系統 ───
+  getColorMatches: async (color: string) => {
+    // 將 hex color 的 # 號編碼，避免網址解析錯誤
+    const encodedColor = encodeURIComponent(color);
+    const res = await fetch(`${BASE_URL}/color-recommendations/matches?color=${encodedColor}`, {
+      method: 'GET',
+      headers: getAuthHeaders()
+    });
+    return res.json();
+  },
 };
