@@ -110,13 +110,26 @@ export const api = {
   },
 
   // ─── 配色建議系統 ───
-  getColorMatches: async (color: string) => {
-    // 將 hex color 的 # 號編碼，避免網址解析錯誤
-    const encodedColor = encodeURIComponent(color);
-    const res = await fetch(`${BASE_URL}/color-recommendations/matches?color=${encodedColor}`, {
-      method: 'GET',
-      headers: getAuthHeaders()
+  getColorMatches: async (
+    color: string,
+    direction:
+      | "main_to_sub"
+      | "sub_to_main"
+        = "main_to_sub"
+  ) => {
+    const params = new URLSearchParams({
+      color,
+      direction,
     });
+
+    const res = await fetch(
+      `${BASE_URL}/color-recommendations/matches?${params.toString()}`,
+      {
+        method: "GET",
+        headers: getAuthHeaders(),
+      }
+    );
+
     return res.json();
   },
 };

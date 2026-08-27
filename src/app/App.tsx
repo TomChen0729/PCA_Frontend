@@ -1,30 +1,3 @@
-/**
- * ============================================================================
- * Color & Style - 個人色彩分析與衣櫥管理系統
- * ============================================================================
- *
- * 【檔案架構說明】
- * 本專案採用單一檔案架構，所有組件都在 src/app/App.tsx 中
- * 樣式使用 Tailwind CSS v4 + 內聯樣式，配色遵循 Aesop 美學風格
- *
- * 【主要功能模組】
- * 1. 登入/註冊系統 (AuthScreen)
- * 2. 首頁導航 (HomeScreen)
- * 3. 個人色彩分析 (ColorAnalysisScreen)
- * 4. 衣櫥管理 (WardrobeScreen)
- * 5. 配色建議 (ColorSuggestionScreen)
- *
- * 【數據流向】
- * App (根組件)
- *   ├─ 管理全局狀態：screen, user, analyses, wardrobe
- *   ├─ 提供導航函數：navigate, goBack
- *   └─ 渲染當前畫面的對應組件
- *
- * 【相關檔案】
- * - /src/styles/theme.css - 全局樣式和設計 tokens
- * - /src/styles/fonts.css - 字型設定 (Playfair Display, DM Sans)
- * - package.json - 依賴套件管理
- */
 import { api } from "../api/api"; // 引入 API 模組
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react"; // 動畫庫
@@ -553,7 +526,7 @@ const startAnalysis = useCallback(async () => {
         const newAnalysis: ColorAnalysis = {
           id: backendData.analysis_id, // 從資料庫取得的 ID
           date: new Date().toISOString().slice(0, 10),
-          imageUrl: `http://127.0.0.1:5000${backendData.image_url}`, // 組合完整圖片網址
+          imageUrl: `http://127.0.0.1:5001${backendData.image_url}`, // 組合完整圖片網址
           season: backendData.season_zh, // 例如：秋季
           type: backendData.label_12_zh, // 例如：暖秋型
           colors: [
@@ -844,7 +817,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
         const newItem: WardrobeItem = {
           id: result.data.item_id,
           date: new Date().toISOString().slice(0, 10),
-          imageUrl: `http://127.0.0.1:5000${result.data.image_url}`, 
+          imageUrl: `http://127.0.0.1:5001${result.data.image_url}`, 
           category: result.data.tag as "top" | "bottom",
           dominantColor: hexColor, // 改為存入 HEX
         };
@@ -1853,9 +1826,19 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
         return;
       }
 
+      // 個人色彩、上衣：把輸入色當「主色」→ 找配色
+      // 下著：把輸入色當「配色」→ 反向找主色
+      const direction =
+        mode === "bottom"
+          ? "sub_to_main"
+          : "main_to_sub";
+
       setIsLoadingMatches(true);
       try {
-        const response = await api.getColorMatches(targetColor);
+        const response = await api.getColorMatches(
+          targetColor,
+          direction
+        );
         if (response.success && response.recommendations.length > 0) {
           // 將 API 回傳的推薦顏色陣列存起來
           const colors = response.recommendations.map((r: any) => r.color);
@@ -2364,7 +2347,7 @@ export default function App() {
         const mappedAnalyses: ColorAnalysis[] = result.data.map((item: any) => ({
           id: item.id,
           date: item.date,
-          imageUrl: `http://127.0.0.1:5000${item.image_url}`,
+          imageUrl: `http://127.0.0.1:5001${item.image_url}`,
           season: item.season, // 接收後端的 "春(Spring)"
           type: item.type,     // 接收後端的 "亮春型"
           colors: item.colors, // 完全接收後端查出的色票陣列
@@ -2393,7 +2376,7 @@ export default function App() {
           return {
             id: item.item_id,
             date: new Date().toISOString().slice(0, 10),
-            imageUrl: `http://127.0.0.1:5000${item.image_url}`,
+            imageUrl: `http://127.0.0.1:5001${item.image_url}`,
             category: item.tag,
             dominantColor: hexColor // 改為存入 HEX
           };

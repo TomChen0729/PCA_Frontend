@@ -38,7 +38,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:5000', // ⚠️ 請記得把這裡改成你實際的後端 Server 網址與 Port
+        target: 'http://127.0.0.1:5001', // ⚠️ 請記得把這裡改成你實際的後端 Server 網址與 Port
         changeOrigin: true,
         
         // 如果你的後端 API 路徑本身沒有包含 /api，請將下面這行開頭的雙斜線 // 刪掉（取消註解）
