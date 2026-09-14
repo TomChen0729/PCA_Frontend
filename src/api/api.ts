@@ -132,4 +132,21 @@ export const api = {
 
     return res.json();
   },
+
+  // ─── AI 虛擬試穿系統 ───
+  generateTryOn: async (humanImgPath: string, garmentImgPath: string, category: string) => {
+    const res = await fetch(`${BASE_URL}/vton/tryon`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        ...getAuthHeaders() 
+      },
+      body: JSON.stringify({
+        human_img_path: humanImgPath,
+        garment_img_path: garmentImgPath,
+        category: category
+      })
+    });
+    return res.json();
+  },
 };

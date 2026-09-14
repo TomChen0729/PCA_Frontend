@@ -5,7 +5,7 @@ import {
   // Lucide React 圖標庫
   ArrowLeft, Sparkles, ShoppingBag, Palette,
   User, X, Eye, EyeOff, Plus, ChevronRight,
-  Camera, Trash2, CheckCircle,
+  Camera, Trash2, CheckCircle,Loader2
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1786,9 +1786,17 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
   const [selectedColor, setSelectedColor] = useState<string | null>(initialColor || null);
   const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null);
 
-  // 新增狀態來儲存從 API 拿回來的配色建議
+  // 配色推薦 API 狀態
   const [recommendedPalettes, setRecommendedPalettes] = useState<string[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
+
+  // 穿搭預覽狀態
+  const [previewTop, setPreviewTop] = useState<WardrobeItem | null>(null);
+  const [previewBottom, setPreviewBottom] = useState<WardrobeItem | null>(null);
+
+  // 🆕 AI 虛擬試穿狀態
+  const [isGeneratingTryOn, setIsGeneratingTryOn] = useState(false);
+  const [tryOnResultUrl, setTryOnResultUrl] = useState<string | null>(null);
 
   const tops = wardrobe.filter(w => w.category === "top");
   const bottoms = wardrobe.filter(w => w.category === "bottom");
@@ -1796,23 +1804,72 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
   function switchMode(m: SuggestionMode) {
     setMode(m);
     setSelectedItem(null);
+    setPreviewTop(null);
+    setPreviewBottom(null);
+    setTryOnResultUrl(null); // 切換模式時清空 AI 圖
     if (m !== "personal") setSelectedColor(null);
   }
 
   function handleBack() {
     if (mode === "personal" && selectedColor) {
       setSelectedColor(null);
+      setPreviewTop(null);
+      setPreviewBottom(null);
+      setTryOnResultUrl(null);
     } else if ((mode === "top" || mode === "bottom") && selectedItem) {
       setSelectedItem(null);
+      setPreviewTop(null);
+      setPreviewBottom(null);
+      setTryOnResultUrl(null);
     } else {
       onBack();
     }
   }
 
-  // 當選擇衣物時，呼叫後端 API 取得配色建議
+  // 當選擇其他衣服放入預覽時，清除前一次的 AI 試穿結果
+  function handleSelectPreview(item: WardrobeItem, type: 'top' | 'bottom') {
+    setTryOnResultUrl(null);
+    if (type === 'top') setPreviewTop(item);
+    if (type === 'bottom') setPreviewBottom(item);
+  }
+
+  // 🆕 呼叫 AI 虛擬試穿 API
+  async function handleAITryOn() {
+    // 使用最新的一筆色彩分析照片作為模特兒
+    const humanImgUrl = analyses.length > 0 ? analyses[0].imageUrl : null;
+    
+    if (!humanImgUrl) {
+      alert("請先完成一次個人色彩分析，系統將使用該照片作為您的專屬試穿模特兒！");
+      return;
+    }
+
+    // 決定要試穿哪一件 (優先試穿上衣，若無則試穿下著)
+    const targetGarment = previewTop || previewBottom;
+    if (!targetGarment) return;
+    
+    const category = previewTop ? "upper_body" : "lower_body";
+
+    setIsGeneratingTryOn(true);
+    try {
+      // 呼叫我們剛寫好的 API
+      const res = await api.generateTryOn(humanImgUrl, targetGarment.imageUrl, category);
+      
+      if (res.success && res.result_image_url) {
+        setTryOnResultUrl(res.result_image_url);
+      } else {
+        alert("AI 試穿生成失敗：" + (res.message || "未知錯誤"));
+      }
+    } catch (e) {
+      console.error("試穿發生錯誤", e);
+      alert("網路連線異常，請稍後再試或檢查後端伺服器");
+    } finally {
+      setIsGeneratingTryOn(false);
+    }
+  }
+
+  // 呼叫後端 API 取得配色建議
   useEffect(() => {
     async function fetchMatches() {
-      // 決定要交給大師分析的目標顏色
       let targetColor = "";
       if (mode === "personal" && selectedColor) {
         targetColor = selectedColor;
@@ -1820,27 +1877,17 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
         targetColor = selectedItem.dominantColor;
       }
 
-      // 如果沒有選顏色，就清空推薦
       if (!targetColor) {
         setRecommendedPalettes([]);
         return;
       }
 
-      // 個人色彩、上衣：把輸入色當「主色」→ 找配色
-      // 下著：把輸入色當「配色」→ 反向找主色
-      const direction =
-        mode === "bottom"
-          ? "sub_to_main"
-          : "main_to_sub";
+      const direction = mode === "bottom" ? "sub_to_main" : "main_to_sub";
 
       setIsLoadingMatches(true);
       try {
-        const response = await api.getColorMatches(
-          targetColor,
-          direction
-        );
+        const response = await api.getColorMatches(targetColor, direction);
         if (response.success && response.recommendations.length > 0) {
-          // 將 API 回傳的推薦顏色陣列存起來
           const colors = response.recommendations.map((r: any) => r.color);
           setRecommendedPalettes(colors);
         } else {
@@ -1855,15 +1902,23 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
     }
 
     fetchMatches();
-  }, [selectedItem, selectedColor, mode]); // 監聽這三個狀態的變化
+  }, [selectedItem, selectedColor, mode]); 
 
-  // Personal mode palette + matches
+  // 自動放入預覽
+  useEffect(() => {
+    if (mode === "top" && selectedItem) {
+      setPreviewTop(selectedItem);
+      setTryOnResultUrl(null);
+    } else if (mode === "bottom" && selectedItem) {
+      setPreviewBottom(selectedItem);
+      setTryOnResultUrl(null);
+    }
+  }, [selectedItem, mode]);
+
+  // 各模式過濾邏輯
   const personalMatchingTops = selectedColor ? tops.filter(t => isColorMatch(t.dominantColor, recommendedPalettes)) : [];
   const personalMatchingBottoms = selectedColor ? bottoms.filter(b => isColorMatch(b.dominantColor, recommendedPalettes)) : [];
 
-  // Wardrobe mode — palette from selected item, find complement
-  // Wardrobe mode 邏輯更新：改用從 API 拿回來的 recommendedPalettes 去衣櫥裡尋找
-  // 如果 API 還在載入，或是 API 回傳空陣列（但有選定衣服），可以給一個空陣列，或是 fallback 到你原本的假資料
   const suggestedBottoms = (selectedItem && mode === "top")
     ? bottoms.filter(b => isColorMatch(b.dominantColor, recommendedPalettes))
     : [];
@@ -1913,6 +1968,85 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
         {/* ── Content ── */}
         <div className="flex-1 overflow-auto px-5 py-5 flex flex-col gap-5">
 
+          {/* 穿搭預覽區塊 */}
+          {(selectedColor || selectedItem) && (
+            <div className="mb-2 shrink-0">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>穿搭預覽</p>
+                <button onClick={() => { 
+                    if(mode === 'top') { setPreviewBottom(null); setTryOnResultUrl(null); }
+                    else if(mode === 'bottom') { setPreviewTop(null); setTryOnResultUrl(null); }
+                    else { setPreviewTop(null); setPreviewBottom(null); setTryOnResultUrl(null); }
+                  }}
+                  className="text-xs px-3 py-1.5 rounded-full"
+                  style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355", background: "rgba(184,115,85,0.1)" }}>
+                  清除搭配
+                </button>
+              </div>
+              
+              <div className="flex flex-col items-center justify-center w-full h-72 rounded-2xl relative overflow-hidden shadow-inner"
+                   style={{ background: "#EDE4D8", border: "1px solid rgba(44,24,16,0.08)" }}>
+                
+                {/* 狀態一：成功產生 AI 圖片 */}
+                {tryOnResultUrl ? (
+                  <motion.img 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    src={tryOnResultUrl.startsWith('http') ? tryOnResultUrl : `http://127.0.0.1:5001${tryOnResultUrl}`}
+                    alt="AI 虛擬試穿結果" 
+                    className="w-full h-full object-cover z-20 absolute inset-0" 
+                  />
+                ) : (
+                  <>
+                    {/* 狀態二：2D CSS 拼貼預覽 (等待觸發 AI) */}
+                    {(!previewTop && !previewBottom) && (
+                      <div className="flex flex-col items-center gap-2 opacity-50">
+                        <ShoppingBag size={32} color="#8A6F5E" />
+                        <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>點擊下方服裝進行搭配</span>
+                      </div>
+                    )}
+
+                    {previewTop && (
+                      <img 
+                        src={previewTop.imageUrl} 
+                        alt="上衣預覽"
+                        className="absolute top-4 w-[55%] object-contain z-10 drop-shadow-md transition-all duration-300" 
+                        style={{ maxHeight: '55%' }} 
+                      />
+                    )}
+                    
+                    {previewBottom && (
+                      <img 
+                        src={previewBottom.imageUrl} 
+                        alt="下著預覽"
+                        className="absolute bottom-4 w-[50%] object-contain z-0 drop-shadow-sm transition-all duration-300" 
+                        style={{ maxHeight: '60%' }} 
+                      />
+                    )}
+
+                    {/* AI 生成按鈕浮水印 */}
+                    {(previewTop || previewBottom) && (
+                      <button 
+                        onClick={handleAITryOn} 
+                        disabled={isGeneratingTryOn}
+                        className="absolute bottom-4 z-30 px-5 py-2.5 rounded-full backdrop-blur-md flex items-center gap-2 transition-transform active:scale-95 shadow-lg"
+                        style={{ 
+                          background: isGeneratingTryOn ? "rgba(44,24,16,0.8)" : "linear-gradient(135deg, #8B3A52 0%, #C4856A 100%)",
+                          color: "#FDFAF6"
+                        }}
+                      >
+                        {isGeneratingTryOn ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                        <span className="text-sm" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 500 }}>
+                          {isGeneratingTryOn ? "AI 魔法生成中..." : "✨ 實穿給我看"}
+                        </span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ════ PERSONAL COLOR MODE ════ */}
           {mode === "personal" && !selectedColor && (
             <>
@@ -1955,7 +2089,6 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
 
           {mode === "personal" && selectedColor && (
             <>
-              {/* Main color hero */}
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>主色</p>
@@ -1974,13 +2107,11 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </div>
               </div>
 
-              {/* Palette */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>單色配色方案</p>
                 <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
-              {/* Wardrobe matches */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-3" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
                   我的衣櫥 · 符合此配色
@@ -1996,7 +2127,14 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                       <div>
                         <p className="text-xs mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355" }}>上衣 ({personalMatchingTops.length})</p>
                         <div className="grid grid-cols-3 gap-2">
-                          {personalMatchingTops.map(item => <WardrobeThumb key={item.id} item={item} />)}
+                          {personalMatchingTops.map(item => (
+                            <WardrobeThumb 
+                              key={item.id} 
+                              item={item} 
+                              selected={previewTop?.id === item.id}
+                              onClick={() => handleSelectPreview(item, 'top')} 
+                            />
+                          ))}
                         </div>
                       </div>
                     )}
@@ -2004,7 +2142,14 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                       <div>
                         <p className="text-xs mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355" }}>下著 ({personalMatchingBottoms.length})</p>
                         <div className="grid grid-cols-3 gap-2">
-                          {personalMatchingBottoms.map(item => <WardrobeThumb key={item.id} item={item} />)}
+                          {personalMatchingBottoms.map(item => (
+                            <WardrobeThumb 
+                              key={item.id} 
+                              item={item} 
+                              selected={previewBottom?.id === item.id}
+                              onClick={() => handleSelectPreview(item, 'bottom')} 
+                            />
+                          ))}
                         </div>
                       </div>
                     )}
@@ -2043,7 +2188,6 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
 
           {mode === "top" && selectedItem && (
             <>
-              {/* Selected top */}
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>主色上衣</p>
@@ -2071,13 +2215,11 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </div>
               </div>
 
-              {/* Palette */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>配色方案</p>
                 <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
-              {/* Suggested bottoms */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-1" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
                   建議搭配下著
@@ -2087,7 +2229,14 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </p>
                 {suggestedBottoms.length > 0 ? (
                   <div className="grid grid-cols-3 gap-2">
-                    {suggestedBottoms.map(item => <WardrobeThumb key={item.id} item={item} />)}
+                    {suggestedBottoms.map(item => (
+                      <WardrobeThumb 
+                        key={item.id} 
+                        item={item} 
+                        selected={previewBottom?.id === item.id}
+                        onClick={() => handleSelectPreview(item, 'bottom')} 
+                      />
+                    ))}
                   </div>
                 ) : (
                   <div className="rounded-2xl p-5 text-center" style={{ background: "#FDFAF6", border: "1.5px dashed rgba(44,24,16,0.15)" }}>
@@ -2130,7 +2279,6 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
 
           {mode === "bottom" && selectedItem && (
             <>
-              {/* Selected bottom */}
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>配色下著</p>
@@ -2158,13 +2306,11 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </div>
               </div>
 
-              {/* Palette */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>配色方案</p>
                 <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
-              {/* Suggested tops */}
               <div>
                 <p className="text-xs tracking-widest uppercase mb-1" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
                   建議搭配上衣
@@ -2174,7 +2320,14 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </p>
                 {suggestedTops.length > 0 ? (
                   <div className="grid grid-cols-3 gap-2">
-                    {suggestedTops.map(item => <WardrobeThumb key={item.id} item={item} />)}
+                    {suggestedTops.map(item => (
+                      <WardrobeThumb 
+                        key={item.id} 
+                        item={item} 
+                        selected={previewTop?.id === item.id}
+                        onClick={() => handleSelectPreview(item, 'top')} 
+                      />
+                    ))}
                   </div>
                 ) : (
                   <div className="rounded-2xl p-5 text-center" style={{ background: "#FDFAF6", border: "1.5px dashed rgba(44,24,16,0.15)" }}>
