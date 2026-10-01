@@ -36,13 +36,18 @@ export default defineConfig({
   
   // ----- server 代理設定 -----
   server: {
+    host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:5001', // ⚠️ 請記得把這裡改成你實際的後端 Server 網址與 Port
+        target: process.env.PCA_BACKEND_ORIGIN || 'http://127.0.0.1:5001',
         changeOrigin: true,
         
         // 如果你的後端 API 路徑本身沒有包含 /api，請將下面這行開頭的雙斜線 // 刪掉（取消註解）
         // rewrite: (path) => path.replace(/^\/api/, '')
+      },
+      '/static': {
+        target: process.env.PCA_BACKEND_ORIGIN || 'http://127.0.0.1:5001',
+        changeOrigin: true,
       },
     },
   },

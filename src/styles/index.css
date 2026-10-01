@@ -1,3 +1,64 @@
 @import './fonts.css';
 @import './tailwind.css';
 @import './theme.css';
+
+:root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Improve desktop readability while retaining the compact phone layout. */
+@media (min-width: 768px) {
+  html { font-size: 17px; }
+}
+
+@media (min-width: 1440px) {
+  html { font-size: 18px; }
+}
+
+.wardrobe-mask-stage {
+  height: min(48vh, 420px);
+  height: min(48dvh, 420px);
+  min-height: 240px;
+}
+
+@media (min-width: 1024px) {
+  .wardrobe-mask-stage {
+    height: min(76vh, 760px);
+    height: min(76dvh, 760px);
+    min-height: 420px;
+  }
+}
+
+@media (max-width: 767px) {
+  /* Prevent mobile Safari from zooming the page when a field gets focus. */
+  input:not([type="range"]), select, textarea {
+    font-size: 16px !important;
+  }
+
+  button:has(> svg:only-child) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .mobile-safe-x {
+    padding-left: max(1.25rem, var(--safe-area-left));
+    padding-right: max(1.25rem, var(--safe-area-right));
+  }
+
+  .mobile-safe-top {
+    padding-top: max(2rem, var(--safe-area-top));
+  }
+
+  .mobile-safe-bottom {
+    padding-bottom: max(1.5rem, var(--safe-area-bottom));
+  }
+}
+
+button:focus-visible, [role="button"]:focus-visible {
+  outline: 3px solid rgba(139, 58, 82, 0.75);
+  outline-offset: 3px;
+}

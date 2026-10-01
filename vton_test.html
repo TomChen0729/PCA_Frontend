@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VTON 整套試穿測試工具</title>
+  <style>
+    body { font-family: Segoe UI, sans-serif; background: #f7f2ec; color: #2c1810; padding: 20px; }
+    .container { max-width: 600px; margin: auto; background: white; padding: 30px; border-radius: 16px; }
+    h2 { text-align: center; color: #8b3a52; }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; margin-bottom: 8px; font-weight: bold; font-size: 14px; color: #8a6f5e; }
+    input { width: 100%; padding: 10px; border: 1px dashed #ccc; border-radius: 8px; box-sizing: border-box; background: #fdfaf6; }
+    button { width: 100%; padding: 12px; background: #8b3a52; color: white; border: 0; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
+    button:disabled { background: #ccc; cursor: wait; }
+    #status { margin-top: 15px; text-align: center; font-weight: bold; color: #b87355; }
+    img { display: none; max-width: 100%; margin-top: 20px; border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h2>VTON 整套試穿測試工具</h2>
+    <div class="form-group">
+      <label for="authToken">登入後取得的 JWT（不會儲存在檔案中）</label>
+      <input type="password" id="authToken" autocomplete="off" placeholder="貼上目前有效的 access token">
+    </div>
+    <div class="form-group">
+      <label for="humanFile">模特兒照片</label>
+      <input type="file" id="humanFile" accept="image/jpeg,image/png,image/webp">
+    </div>
+    <div class="form-group">
+      <label for="topFile">上衣照片（可選）</label>
+      <input type="file" id="topFile" accept="image/jpeg,image/png,image/webp">
+    </div>
+    <div class="form-group">
+      <label for="bottomFile">下著照片（可選）</label>
+      <input type="file" id="bottomFile" accept="image/jpeg,image/png,image/webp">
+    </div>
+    <button id="testBtn" onclick="runTryOnTest()">開始整套試穿</button>
+    <div id="status" role="status"></div>
+    <img id="resultImg" alt="AI 虛擬試穿結果">
+  </main>
+  <script>
+    const API_BASE = "http://127.0.0.1:5001/api/vton";
+
+    async function runTryOnTest() {
+      const token = document.getElementById("authToken").value.trim();
+      const humanFile = document.getElementById("humanFile").files[0];
+      const topFile = document.getElementById("topFile").files[0];
+      const bottomFile = document.getElementById("bottomFile").files[0];
+      const status = document.getElementById("status");
+      const resultImg = document.getElementById("resultImg");
+      const button = document.getElementById("testBtn");
+      if (!token || !humanFile || (!topFile && !bottomFile)) {
+        alert("請提供有效 JWT、模特兒照片，並至少選擇上衣或下著。");
+        return;
+      }
+
+      button.disabled = true;
+      resultImg.style.display = "none";
+      let humanResultId = null;
+      try {
+        const stages = [
+          ...(topFile ? [{ file: topFile, category: "upper_body", label: "上衣" }] : []),
+          ...(bottomFile ? [{ file: bottomFile, category: "lower_body", label: "下著" }] : []),
+        ];
+        for (const [index, stage] of stages.entries()) {
+          status.textContent = `AI 正在生成${stage.label}（${index + 1}/${stages.length}）...`;
+          const form = new FormData();
+          form.append("category", stage.category);
+          form.append("garment_image", stage.file);
+          if (humanResultId) form.append("human_result_id", humanResultId);
+          else form.append("human_image", humanFile);
+
+          const response = await fetch(`${API_BASE}/tryon`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            body: form,
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.message || `API 錯誤 (${response.status})`);
+          humanResultId = result.result_id;
+
+          const imageResponse = await fetch(`http://127.0.0.1:5001${result.result_image_url}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!imageResponse.ok) throw new Error("無法讀取試穿結果圖片");
+          if (resultImg.dataset.objectUrl) URL.revokeObjectURL(resultImg.dataset.objectUrl);
+          resultImg.dataset.objectUrl = URL.createObjectURL(await imageResponse.blob());
+          resultImg.src = resultImg.dataset.objectUrl;
+        }
+        resultImg.style.display = "block";
+        status.textContent = stages.length === 2 ? "整套試穿完成！" : "試穿完成！";
+      } catch (error) {
+        status.textContent = `發生錯誤：${error instanceof Error ? error.message : "未知錯誤"}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

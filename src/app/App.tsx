@@ -1,11 +1,13 @@
-import { api } from "../api/api"; // 引入 API 模組
+import { api, isSessionExpiredError, resolveAssetUrl } from "../api/api";
+import VirtualTryOnScreen from "./components/VirtualTryOnScreen";
+import OutfitCollectionScreen from "./components/OutfitCollectionScreen";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react"; // 動畫庫
 import {
   // Lucide React 圖標庫
   ArrowLeft, Sparkles, ShoppingBag, Palette,
   User, X, Eye, EyeOff, Plus, ChevronRight,
-  Camera, Trash2, CheckCircle,Loader2
+  Camera, Trash2, CheckCircle
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -15,7 +17,8 @@ import {
  * Screen - 畫面類型
  * 定義應用中所有可能的畫面狀態
  */
-type Screen = "auth" | "home" | "color-analysis" | "wardrobe" | "color-suggestion";
+type Screen = "auth" | "home" | "color-analysis" | "wardrobe" | "color-suggestion" | "virtual-tryon" | "outfits";
+type RemoteDataState = "idle" | "loading" | "loaded" | "error";
 
 /**
  * UserAccount - 使用者帳號
@@ -48,23 +51,40 @@ interface WardrobeItem {
   id: number;                 // 唯一識別碼
   date: string;               // 上傳日期 (YYYY-MM-DD)
   imageUrl: string;           // 衣物照片 URL
+  tryOnImageUrl?: string;     // AI 試穿使用的原始圖片
   category: "top" | "bottom"; // 類別：上衣或下著
-  dominantColor: string;      // 主要顏色 (HEX 格式，由系統模擬產生)
+  dominantColor: string;      // 第一個主要顏色
 }
 
 // ─── Color palette generation ────────────────────────────────────────────────
 // 配色方案生成工具函數
+
+function hexToRgb(hex: string): [number, number, number] {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return result ? [parseInt(result[1], 16), parseInt(result[2], 16), parseInt(result[3], 16)] : [0, 0, 0];
+}
+
+function colorFamilyName(hex: string): string {
+  const [r, g, b] = hexToRgb(hex);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min;
+  if (max < 45) return "黑色系";
+  if (delta < 20) return max > 220 ? "白色系" : "灰色系";
+  const hue = max === r ? ((g - b) / delta + (g < b ? 6 : 0)) * 60 : max === g ? ((b - r) / delta + 2) * 60 : ((r - g) / delta + 4) * 60;
+  if (hue < 15 || hue >= 345) return "紅色系";
+  if (hue < 45) return "橘色系";
+  if (hue < 70) return "黃色系";
+  if (hue < 165) return "綠色系";
+  if (hue < 200) return "青色系";
+  if (hue < 255) return "藍色系";
+  if (hue < 290) return "紫色系";
+  return "粉紅色系";
+}
 
 /**
  * hexToRgb - 將 HEX 顏色轉換為 RGB
  * @param hex - HEX 顏色字串 (例如：#C4856A)
  * @returns RGB 值的陣列 [r, g, b]
  */
-function hexToRgb(hex: string): [number, number, number] {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result ? [parseInt(result[1], 16), parseInt(result[2], 16), parseInt(result[3], 16)] : [0, 0, 0];
-}
-
 /**
  * rgbToHex - 將 RGB 顏色轉換為 HEX
  * @param r - 紅色值 (0-255)
@@ -76,32 +96,18 @@ function rgbToHex(r: number, g: number, b: number): string {
   return "#" + [r, g, b].map(x => Math.round(x).toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * colorDistance - 計算兩個顏色之間的距離
- * @param hex1 - 第一個顏色 (HEX)
- * @param hex2 - 第二個顏色 (HEX)
- * @returns 顏色距離值 (0-441，值越小越相似)
- *
- * 使用歐氏距離公式計算 RGB 空間中的距離
- */
 function colorDistance(hex1: string, hex2: string): number {
   const [r1, g1, b1] = hexToRgb(hex1);
   const [r2, g2, b2] = hexToRgb(hex2);
   return Math.sqrt(Math.pow(r1 - r2, 2) + Math.pow(g1 - g2, 2) + Math.pow(b1 - b2, 2));
 }
 
-/**
- * isColorMatch - 判斷顏色是否匹配配色方案
- * @param itemColor - 要檢查的顏色 (HEX)
- * @param paletteColors - 配色方案的顏色陣列
- * @param threshold - 相似度閾值 (預設 80，值越小要求越嚴格)
- * @returns 是否匹配
- *
- * 用於「配色建議」功能，判斷衣櫥中的單品顏色
- * 是否與個人色彩分析結果匹配
- */
 function isColorMatch(itemColor: string, paletteColors: string[], threshold: number = 80): boolean {
   return paletteColors.some(c => colorDistance(itemColor, c) < threshold);
+}
+
+function closestColorDistance(itemColor: string, paletteColors: string[]): number {
+  return paletteColors.length ? Math.min(...paletteColors.map((color) => colorDistance(itemColor, color))) : Infinity;
 }
 
 // ─── Shared transition ────────────────────────────────────────────────────────
@@ -222,7 +228,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
   }
 
   return (
-    <div className="flex flex-col justify-center h-full bg-background px-6">
+    <div className="mobile-safe-top mobile-safe-bottom flex h-full min-h-0 flex-col justify-start overflow-y-auto bg-background px-6 py-4 md:justify-center md:px-12 md:py-8">
       {/* Hero section */}
       <div className="flex flex-col items-center pb-6">
         <motion.div
@@ -258,7 +264,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
         initial={{ y: 30, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         transition={{ delay: 0.4, duration: 0.6 }}
-        className="pb-5"
+        className="mx-auto w-full max-w-md pb-5"
       >
         <div className="rounded-xl p-4 text-center"
           style={{ background: "#FDFAF6", border: "1px solid rgba(44,24,16,0.08)" }}
@@ -274,6 +280,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
         initial={{ y: 40, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         transition={{ delay: 0.7, duration: 0.5 }}
+        className="mx-auto w-full max-w-md"
       >
         <div className="rounded-2xl p-5 shadow-lg"
           style={{ background: "#FDFAF6", border: "1px solid rgba(44,24,16,0.1)" }}>
@@ -327,7 +334,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
                   value={loginId}
                   onChange={(e) => setLoginId(e.target.value)}
                   placeholder="請輸入帳號或信箱"
-                  className="w-full rounded-xl px-4 py-3 text-sm outline-none"
+                  className="w-full rounded-xl px-4 py-3 text-base outline-none"
                   style={{ background: "#EDE4D8", color: "#2C1810", fontFamily: "'DM Sans', sans-serif", border: "1px solid transparent" }}
                   onFocus={(e) => (e.target.style.border = "1px solid #B87355")}
                   onBlur={(e) => (e.target.style.border = "1px solid transparent")}
@@ -344,7 +351,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
                     value={account}
                     onChange={(e) => setAccount(e.target.value)}
                     placeholder="請設定登入帳號"
-                    className="w-full rounded-xl px-4 py-3 text-sm outline-none"
+                    className="w-full rounded-xl px-4 py-3 text-base outline-none"
                     style={{ background: "#EDE4D8", color: "#2C1810", fontFamily: "'DM Sans', sans-serif", border: "1px solid transparent" }}
                     onFocus={(e) => (e.target.style.border = "1px solid #B87355")}
                     onBlur={(e) => (e.target.style.border = "1px solid transparent")}
@@ -359,7 +366,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="請輸入電子郵件"
-                    className="w-full rounded-xl px-4 py-3 text-sm outline-none"
+                    className="w-full rounded-xl px-4 py-3 text-base outline-none"
                     style={{ background: "#EDE4D8", color: "#2C1810", fontFamily: "'DM Sans', sans-serif", border: "1px solid transparent" }}
                     onFocus={(e) => (e.target.style.border = "1px solid #B87355")}
                     onBlur={(e) => (e.target.style.border = "1px solid transparent")}
@@ -379,7 +386,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="請輸入密碼（至少 4 位）"
-                  className="w-full rounded-xl px-4 py-3 text-sm outline-none pr-11"
+                  className="w-full rounded-xl px-4 py-3 text-base outline-none pr-11"
                   style={{ background: "#EDE4D8", color: "#2C1810", fontFamily: "'DM Sans', sans-serif", border: "1px solid transparent" }}
                   onFocus={(e) => (e.target.style.border = "1px solid #B87355")}
                   onBlur={(e) => (e.target.style.border = "1px solid transparent")}
@@ -406,7 +413,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="再次輸入密碼"
-                    className="w-full rounded-xl px-4 py-3 text-sm outline-none pr-11"
+                    className="w-full rounded-xl px-4 py-3 text-base outline-none pr-11"
                     style={{ background: "#EDE4D8", color: "#2C1810", fontFamily: "'DM Sans', sans-serif", border: "1px solid transparent" }}
                     onFocus={(e) => (e.target.style.border = "1px solid #B87355")}
                     onBlur={(e) => (e.target.style.border = "1px solid transparent")}
@@ -525,18 +532,12 @@ const startAnalysis = useCallback(async () => {
         // 將後端的資料結構 Mapping 到前端定義的 ColorAnalysis 介面
         const newAnalysis: ColorAnalysis = {
           id: backendData.analysis_id, // 從資料庫取得的 ID
-          date: new Date().toISOString().slice(0, 10),
-          imageUrl: `http://127.0.0.1:5001${backendData.image_url}`, // 組合完整圖片網址
-          season: backendData.season_zh, // 例如：秋季
-          type: backendData.label_12_zh, // 例如：暖秋型
-          colors: [
-            // 取出後端特徵萃取的代表色作為色票
-            backendData.representative_colors.skin || "#FFFFFF",
-            backendData.representative_colors.lip || "#FFFFFF",
-            backendData.representative_colors.hair || "#FFFFFF",
-            backendData.representative_colors.iris || "#FFFFFF",
-          ],
-          description: "根據您的臉部特徵，系統分析出了最適合您的專屬色彩！",
+          date: backendData.date,
+          imageUrl: resolveAssetUrl(backendData.image_url),
+          season: backendData.season,
+          type: backendData.type,
+          colors: backendData.colors,
+          description: backendData.description,
         };
         onComplete(newAnalysis);
         onClose();
@@ -563,7 +564,7 @@ const startAnalysis = useCallback(async () => {
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             onClick={step === "pick" ? onClose : undefined} />
 
-          <motion.div key="sh" className="absolute bottom-0 left-0 right-0 z-30 rounded-t-3xl overflow-hidden"
+          <motion.div key="sh" className="absolute bottom-0 left-0 right-0 z-30 overflow-hidden rounded-t-3xl md:inset-0 md:m-auto md:w-[min(92vw,640px)] md:rounded-3xl"
             style={{ background: "#FDFAF6" }}
             initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
             transition={{ type: "spring", stiffness: 340, damping: 34 }}>
@@ -771,8 +772,39 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
   const [step, setStep] = useState<WardrobeStep>("category");
   const [category, setCategory] = useState<"top" | "bottom">("top");
   const [preview, setPreview] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [maskData, setMaskData] = useState<string | null>(null);
+  const [maskReady, setMaskReady] = useState(false);
+  const [maskCoverage, setMaskCoverage] = useState<number | null>(null);
+  const [segmentationError, setSegmentationError] = useState("");
+  const [isSegmenting, setIsSegmenting] = useState(false);
+  const [maskTool, setMaskTool] = useState<"erase" | "restore">("erase");
+  const [brushSize, setBrushSize] = useState(28);
+  const [brushCursor, setBrushCursor] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false });
   const [isUploading, setIsUploading] = useState(false); // 🆕 新增上傳中狀態
   const fileRef = useRef<HTMLInputElement>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const originalImageRef = useRef<HTMLImageElement | null>(null);
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const initialMaskRef = useRef<ImageData | null>(null);
+  const lastBrushPointRef = useRef<{ x: number; y: number } | null>(null);
+
+  function closeModal() {
+    if (isUploading || isSegmenting) return;
+    if (preview) URL.revokeObjectURL(preview);
+    setPreview(null);
+    setSelectedFile(null);
+    setMaskData(null);
+    setMaskReady(false);
+    setMaskCoverage(null);
+    setSegmentationError("");
+    maskCanvasRef.current = null;
+    initialMaskRef.current = null;
+    originalImageRef.current = null;
+    lastBrushPointRef.current = null;
+    if (fileRef.current) fileRef.current.value = "";
+    onClose();
+  }
 
   useEffect(() => {
     if (open) {
@@ -783,32 +815,134 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
         setStep("category");
         setCategory("top");
       }
+      if (preview) URL.revokeObjectURL(preview);
       setPreview(null);
+      setSelectedFile(null);
+      setMaskData(null);
+      setMaskReady(false);
+      setMaskCoverage(null);
+      setSegmentationError("");
       setIsUploading(false);
     }
   }, [open, initialCategory]);
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    // Allow selecting the same file again after resetting or changing category.
+    e.target.value = "";
     if (!file) return;
+    if (preview) URL.revokeObjectURL(preview);
     const url = URL.createObjectURL(file);
+    setSelectedFile(file);
     setPreview(url);
+    setMaskData(null);
+    setMaskReady(false);
+    setMaskCoverage(null);
+    setSegmentationError("");
+    setIsSegmenting(true);
+    try {
+      const result = await api.previewWardrobeItem(file, category);
+      setMaskData(result.mask_data);
+      setMaskCoverage(result.coverage);
+    } catch (cause) {
+      setSegmentationError(cause instanceof Error ? cause.message : "衣物辨識失敗，請換一張照片再試");
+    } finally {
+      setIsSegmenting(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!preview || !maskData) return;
+    let cancelled = false;
+    const source = new Image();
+    const mask = new Image();
+    const sourceLoaded = new Promise<void>((resolve, reject) => { source.onload = () => resolve(); source.onerror = () => reject(); });
+    const maskLoaded = new Promise<void>((resolve, reject) => { mask.onload = () => resolve(); mask.onerror = () => reject(); });
+    source.src = preview;
+    mask.src = maskData;
+    Promise.all([sourceLoaded, maskLoaded]).then(() => {
+      if (cancelled || !previewCanvasRef.current) return;
+      originalImageRef.current = source;
+      const canvas = previewCanvasRef.current;
+      canvas.width = source.naturalWidth; canvas.height = source.naturalHeight;
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = source.naturalWidth; maskCanvas.height = source.naturalHeight;
+      const maskContext = maskCanvas.getContext("2d");
+      if (!maskContext) return;
+      maskContext.drawImage(mask, 0, 0, maskCanvas.width, maskCanvas.height);
+      const maskPixels = maskContext.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+      for (let i = 0; i < maskPixels.data.length; i += 4) {
+        const alpha = maskPixels.data[i];
+        maskPixels.data[i] = 255; maskPixels.data[i + 1] = 255; maskPixels.data[i + 2] = 255; maskPixels.data[i + 3] = alpha;
+      }
+      maskContext.putImageData(maskPixels, 0, 0);
+      maskCanvasRef.current = maskCanvas;
+      initialMaskRef.current = maskContext.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+      setMaskReady(true);
+      redrawMaskPreview();
+    }).catch(() => setSegmentationError("無法顯示衣物遮罩，請重新選擇照片"));
+    return () => { cancelled = true; };
+  }, [preview, maskData]);
+
+  function redrawMaskPreview() {
+    const canvas = previewCanvasRef.current;
+    const maskCanvas = maskCanvasRef.current;
+    const source = originalImageRef.current;
+    if (!canvas || !maskCanvas || !source?.complete) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.globalCompositeOperation = "source-over";
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    context.globalCompositeOperation = "destination-in";
+    context.drawImage(maskCanvas, 0, 0);
+    context.globalCompositeOperation = "source-over";
+  }
+
+  function paintMask(event: React.PointerEvent<HTMLCanvasElement>) {
+    const canvas = previewCanvasRef.current;
+    const maskCanvas = maskCanvasRef.current;
+    if (!canvas || !maskCanvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const containerBounds = canvas.parentElement?.getBoundingClientRect();
+    if (containerBounds) setBrushCursor({ x: event.clientX - containerBounds.left, y: event.clientY - containerBounds.top, visible: true });
+    const point = { x: (event.clientX - bounds.left) * canvas.width / bounds.width, y: (event.clientY - bounds.top) * canvas.height / bounds.height };
+    const context = maskCanvas.getContext("2d");
+    if (!context) return;
+    context.lineWidth = brushSize * canvas.width / bounds.width;
+    context.lineCap = "round"; context.lineJoin = "round";
+    if (maskTool === "erase") context.globalCompositeOperation = "destination-out";
+    else { context.globalCompositeOperation = "source-over"; context.strokeStyle = "rgba(255,255,255,1)"; }
+    const previous = lastBrushPointRef.current || point;
+    context.beginPath(); context.moveTo(previous.x, previous.y); context.lineTo(point.x, point.y); context.stroke();
+    context.globalCompositeOperation = "source-over";
+    lastBrushPointRef.current = point;
+    redrawMaskPreview();
+  }
+
+  function resetMask() {
+    const context = maskCanvasRef.current?.getContext("2d");
+    const mask = initialMaskRef.current;
+    if (!context || !mask) return;
+    context.putImageData(mask, 0, 0);
+    redrawMaskPreview();
   }
 
   // 🆕 修改為非同步函數，並呼叫後端 API
   // 在 AddWardrobeModal 組件中
   async function handleConfirm() {
-    if (!preview || !fileRef.current?.files?.[0]) return;
-    
-    const file = fileRef.current.files[0];
+    const canvas = previewCanvasRef.current;
+    if (!selectedFile || !maskData || !maskReady || !canvas || isSegmenting) return;
     setIsUploading(true); 
     
     try {
-      const result = await api.addWardrobeItem(file, category);
+      const editedBlob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("無法輸出修正後的衣物圖片")), "image/png"));
+      const editedFile = new File([editedBlob], "wardrobe-segmented.png", { type: "image/png" });
+      const result = await api.addWardrobeItem(editedFile, category, true);
       
       if (result.success) {
         // 將後端傳來的 "42,42,44" 字串轉成 HEX
-        let hexColor = '#C4856A'; // 預設色
+        let hexColor = '#C4856A';
         if (result.data.colors[0]) {
           const [r, g, b] = result.data.colors[0].split(',').map(Number);
           hexColor = rgbToHex(r, g, b);
@@ -816,8 +950,9 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
 
         const newItem: WardrobeItem = {
           id: result.data.item_id,
-          date: new Date().toISOString().slice(0, 10),
-          imageUrl: `http://127.0.0.1:5001${result.data.image_url}`, 
+          date: result.data.date,
+          imageUrl: resolveAssetUrl(result.data.preview_url || result.data.image_url),
+          tryOnImageUrl: resolveAssetUrl(result.data.image_url),
           category: result.data.tag as "top" | "bottom",
           dominantColor: hexColor, // 改為存入 HEX
         };
@@ -842,10 +977,11 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
           <motion.div key="bd" className="absolute inset-0 z-20"
             style={{ background: "rgba(44,24,16,0.5)", backdropFilter: "blur(3px)" }}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={(step === "category" && !isUploading) ? onClose : undefined} />
+            onClick={(step === "category" && !isUploading && !isSegmenting) ? closeModal : undefined} />
 
-          <motion.div key="sh" className="absolute bottom-0 left-0 right-0 z-30 rounded-t-3xl overflow-hidden max-h-[85vh] flex flex-col"
+          <motion.div key="sh" role="dialog" aria-modal="true" aria-labelledby="wardrobe-modal-title" className={`absolute bottom-0 left-0 right-0 z-30 flex max-h-[94dvh] flex-col overflow-hidden rounded-t-3xl md:top-1/2 md:bottom-auto md:m-auto md:max-h-[96dvh] md:-translate-y-1/2 ${step === "category" ? "md:w-[min(92vw,640px)]" : "md:w-[min(98vw,1440px)]"} md:rounded-3xl`}
             style={{ background: "#FDFAF6" }}
+            onKeyDown={(event) => { if (event.key === "Escape" && !isUploading && !isSegmenting) { event.stopPropagation(); closeModal(); } }}
             initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
             transition={{ type: "spring", stiffness: 340, damping: 34 }}>
 
@@ -853,18 +989,18 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
               <div className="w-10 h-1 rounded-full" style={{ background: "rgba(44,24,16,0.15)" }} />
             </div>
 
-            <div className="px-6 pb-10 pt-3 overflow-auto">
+            <div className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-3 sm:px-6 md:px-7 md:pb-7">
               <div className="flex items-center justify-between mb-6">
                 <div>
-                  <h2 className="text-xl" style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 400, color: "#2C1810" }}>
+                  <h2 id="wardrobe-modal-title" className="text-xl" style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 400, color: "#2C1810" }}>
                     {step === "category" ? "選擇服裝類型" : `新增${category === "top" ? "上衣" : "下著"}`}
                   </h2>
                   <p className="text-xs tracking-widest uppercase mt-0.5" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#B87355" }}>
                     {step === "category" ? "Choose Category" : "Upload Photo"}
                   </p>
                 </div>
-                {step === "category" && !isUploading && (
-                  <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "rgba(44,24,16,0.07)" }}>
+                {!isUploading && !isSegmenting && (
+                  <button type="button" aria-label="關閉新增衣物視窗" onClick={closeModal} className="h-11 w-11 rounded-full flex items-center justify-center" style={{ background: "rgba(44,24,16,0.07)" }}>
                     <X size={15} color="#8A6F5E" strokeWidth={2} />
                   </button>
                 )}
@@ -901,22 +1037,28 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
               )}
 
               {step === "pick" && (
-                <div className="flex flex-col gap-5">
-                  <button
-                    onClick={() => !isUploading && fileRef.current?.click()}
-                    className="w-full rounded-2xl flex flex-col items-center justify-center transition-opacity active:opacity-70 overflow-hidden relative"
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)] lg:gap-6">
+                  <div
+                    className="wardrobe-mask-stage w-full rounded-2xl flex flex-col items-center justify-center overflow-hidden relative"
+                    role={!preview ? "button" : undefined}
+                    tabIndex={!preview ? 0 : undefined}
+                    aria-label={!preview ? `選擇${category === "top" ? "上衣" : "下著"}照片` : undefined}
+                    onClick={() => { if (!preview && !isSegmenting) fileRef.current?.click(); }}
+                    onKeyDown={(event) => { if (!preview && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); fileRef.current?.click(); } }}
+                    onPointerLeave={() => setBrushCursor((cursor) => ({ ...cursor, visible: false }))}
                     style={{
-                      height: 220,
                       background: preview ? "transparent" : "#EDE4D8",
                       border: preview ? "none" : "1.5px dashed rgba(44,24,16,0.2)",
+                      cursor: preview ? "default" : "pointer",
                     }}
                   >
                     {preview ? (
                       <>
-                        <img src={preview} alt="preview" className={`w-full h-full object-cover rounded-2xl ${isUploading ? 'opacity-50' : ''}`} />
-                        {isUploading && (
+                        {maskData ? <canvas ref={previewCanvasRef} aria-label="衣物去肢體遮罩預覽，可使用畫筆修正" onPointerDown={(event) => { if (isUploading) return; event.currentTarget.setPointerCapture(event.pointerId); lastBrushPointRef.current = null; paintMask(event); }} onPointerMove={(event) => { const parentBounds = event.currentTarget.parentElement?.getBoundingClientRect(); if (parentBounds) setBrushCursor({ x: event.clientX - parentBounds.left, y: event.clientY - parentBounds.top, visible: true }); if (event.buttons === 1 && !isUploading) paintMask(event); }} onPointerUp={() => { lastBrushPointRef.current = null; }} onPointerCancel={() => { lastBrushPointRef.current = null; setBrushCursor((cursor) => ({ ...cursor, visible: false })); }} className={`h-full w-auto max-h-full max-w-full rounded-2xl object-contain touch-none ${isUploading ? 'opacity-50' : ''}`} style={{ cursor: "none", backgroundColor: "#EDE4D8", backgroundImage: "linear-gradient(45deg, #ded2c8 25%, transparent 25%), linear-gradient(-45deg, #ded2c8 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ded2c8 75%), linear-gradient(-45deg, transparent 75%, #ded2c8 75%)", backgroundSize: "20px 20px", backgroundPosition: "0 0, 0 10px, 10px -10px, -10px 0px" }} /> : <img src={preview} alt="原始衣物照片" className="h-full w-full rounded-2xl object-contain" />}
+                        {maskData && brushCursor.visible && !isUploading && <div aria-hidden="true" className="pointer-events-none absolute rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.75)]" style={{ width: brushSize, height: brushSize, left: brushCursor.x, top: brushCursor.y, transform: "translate(-50%, -50%)" }} />}
+                        {(isUploading || isSegmenting) && (
                           <div className="absolute inset-0 flex items-center justify-center">
-                            <span className="px-4 py-2 rounded-xl bg-black/60 text-white text-sm tracking-widest">去背分析中...</span>
+                            <span className="px-4 py-2 rounded-xl bg-black/60 text-white text-sm tracking-widest">{isUploading ? "儲存修正結果..." : "AI 正在辨識衣物..."}</span>
                           </div>
                         )}
                       </>
@@ -928,21 +1070,37 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                         <p className="text-sm" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#8A6F5E" }}>
                           點此上傳{category === "top" ? "上衣" : "下著"}照片
                         </p>
-                        <p className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#C4A898" }}>支援 JPG、PNG、HEIC</p>
+                        <p className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#C4A898" }}>支援 JPG、PNG、WEBP</p>
                       </div>
                     )}
-                  </button>
+                  </div>
+                  <div className="flex min-w-0 flex-col gap-4 lg:max-h-[min(66dvh,680px)] lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
                   <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
+                  {!preview && <button type="button" onClick={() => fileRef.current?.click()} className="rounded-xl bg-[#EDE4D8] px-4 py-3 text-sm text-[#5A3A2E]">選擇{category === "top" ? "上衣" : "下著"}照片</button>}
+
+                  {preview && <div className="flex flex-col gap-3">
+                    <p className="text-xs leading-relaxed text-[#8A6F5E]">自動保留辨識到的{category === "top" ? "上衣" : "下著"}，手腳會透明化。建議拍衣服平放或掛拍；若照片中手腳遮住衣服，遮住的布料細節無法自動還原。</p>
+                    {maskData && <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button type="button" onClick={() => setMaskTool("erase")} aria-pressed={maskTool === "erase"} className={`rounded-lg px-3 py-2 text-xs ${maskTool === "erase" ? "bg-[#8B3A52] text-white" : "bg-[#EDE4D8] text-[#5A3A2E]"}`}>擦除手腳／雜物</button>
+                        <button type="button" onClick={() => setMaskTool("restore")} aria-pressed={maskTool === "restore"} className={`rounded-lg px-3 py-2 text-xs ${maskTool === "restore" ? "bg-[#8B3A52] text-white" : "bg-[#EDE4D8] text-[#5A3A2E]"}`}>恢復被誤刪布料</button>
+                        <button type="button" onClick={resetMask} className="rounded-lg bg-[#EDE4D8] px-3 py-2 text-xs text-[#5A3A2E]">重設遮罩</button>
+                      </div>
+                      <label className="flex items-center gap-3 text-xs text-[#8A6F5E]">筆刷大小 <input type="range" min="8" max="72" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} /> {brushSize}px <span className="ml-auto">自動遮罩保留 {maskCoverage === null ? "—" : `${Math.round(maskCoverage * 100)}%`}</span></label>
+                    </>}
+                    {segmentationError && <p role="alert" className="rounded-lg bg-red-50 p-2 text-xs text-red-700">{segmentationError}</p>}
+                    <button type="button" onClick={() => fileRef.current?.click()} disabled={isUploading || isSegmenting} className="self-start rounded-lg bg-[#EDE4D8] px-3 py-2 text-xs text-[#5A3A2E]">重新選擇照片</button>
+                  </div>}
 
                   <div className="flex gap-3">
                     <button
                       onClick={() => {
-                        if (isUploading) return;
-                        if (preview) { setPreview(null); if (fileRef.current) fileRef.current.value = ""; }
-                        else if (initialCategory) onClose();
+                        if (isUploading || isSegmenting) return;
+                        if (preview) { URL.revokeObjectURL(preview); setPreview(null); setSelectedFile(null); setMaskData(null); setMaskReady(false); setMaskCoverage(null); setSegmentationError(""); maskCanvasRef.current = null; initialMaskRef.current = null; originalImageRef.current = null; if (fileRef.current) fileRef.current.value = ""; }
+                        else if (initialCategory) closeModal();
                         else setStep("category");
                       }}
-                      disabled={isUploading}
+                      disabled={isUploading || isSegmenting}
                       className="flex-1 rounded-xl py-3 active:opacity-70 transition-opacity disabled:opacity-50"
                       style={{ background: "rgba(44,24,16,0.07)" }}
                     >
@@ -953,16 +1111,17 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                     {preview && (
                       <button
                         onClick={handleConfirm}
-                        disabled={isUploading}
+                        disabled={isUploading || isSegmenting || !maskData || !maskReady || !!segmentationError}
                         className="flex-1 rounded-xl py-3 flex items-center justify-center gap-2 active:opacity-70 transition-opacity disabled:opacity-50"
                         style={{ background: "linear-gradient(135deg, #8B3A52 0%, #6B2A40 100%)" }}
                       >
                         {!isUploading && <CheckCircle size={15} color="#FDFAF6" strokeWidth={1.8} />}
                         <span className="text-sm tracking-wide" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 400, color: "#FDFAF6" }}>
-                          {isUploading ? "處理中..." : `新增${category === "top" ? "上衣" : "下著"}`}
+                          {isUploading ? "儲存中..." : isSegmenting ? "辨識中..." : !maskData ? "等待衣物辨識" : `確認並新增${category === "top" ? "上衣" : "下著"}`}
                         </span>
                       </button>
                     )}
+                  </div>
                   </div>
                 </div>
               )}
@@ -1016,11 +1175,13 @@ function HomeScreen({ onNavigate, onNavigateColorSuggestion, user, onUserClick }
     { id: "color-analysis", label: "個人色彩分析", sublabel: "Personal Color Analysis", icon: Sparkles, gradient: "from-[#C4856A] to-[#8B3A52]", onClick: () => onNavigate("color-analysis") },
     { id: "wardrobe", label: "我的衣櫥", sublabel: "My Wardrobe", icon: ShoppingBag, gradient: "from-[#8B3A52] to-[#6B2A40]", onClick: () => onNavigate("wardrobe") },
     { id: "color-suggestion", label: "配色建議", sublabel: "Color Coordination", icon: Palette, gradient: "from-[#B87355] to-[#C4856A]", onClick: onNavigateColorSuggestion },
+    { id: "virtual-tryon", label: "虛擬試衣", sublabel: "Virtual Try-On", icon: Sparkles, gradient: "from-[#B87355] to-[#8B3A52]", onClick: () => onNavigate("virtual-tryon") },
+    { id: "outfits", label: "穿搭收藏與紀錄", sublabel: "Outfit Collection", icon: CheckCircle, gradient: "from-[#8B3A52] to-[#C4856A]", onClick: () => onNavigate("outfits") },
   ];
 
   return (
     <div className="flex flex-col h-full bg-background">
-      <div className="flex justify-end px-5 pt-14 relative">
+      <div className="mobile-safe-x mobile-safe-top relative flex shrink-0 justify-end md:mx-auto md:w-full md:max-w-7xl md:px-8 md:pt-8">
         <motion.button
           onClick={() => user ? setShowLogoutMenu(!showLogoutMenu) : onUserClick()}
           whileTap={{ scale: 0.92 }}
@@ -1067,7 +1228,7 @@ function HomeScreen({ onNavigate, onNavigateColorSuggestion, user, onUserClick }
         </AnimatePresence>
       </div>
 
-      <div className="flex flex-col items-center pt-8 pb-10 px-8">
+      <div className="flex shrink-0 flex-col items-center px-8 pb-8 pt-6 md:pb-10 md:pt-8">
         <div className="w-14 h-px bg-accent mb-6 opacity-50" />
         <h1 className="text-4xl text-center leading-tight text-foreground"
           style={{ fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 400 }}>
@@ -1080,7 +1241,7 @@ function HomeScreen({ onNavigate, onNavigateColorSuggestion, user, onUserClick }
         <div className="w-14 h-px bg-accent mt-6 opacity-50" />
       </div>
 
-      <div className="flex flex-col gap-4 px-6 pb-10 flex-1 justify-center">
+      <div className="min-h-0 flex flex-1 flex-col justify-start gap-4 overflow-y-auto overscroll-contain px-6 pb-8 md:mx-auto md:grid md:w-full md:max-w-4xl md:grid-cols-2 md:content-center md:gap-5 md:px-8 md:pb-10 md:justify-center">
         {buttons.map((btn, i) => {
           const Icon = btn.icon;
           return (
@@ -1089,7 +1250,7 @@ function HomeScreen({ onNavigate, onNavigateColorSuggestion, user, onUserClick }
               transition={{ delay: 0.1 * i, duration: 0.5, ease: "easeOut" }}
               onClick={btn.onClick}
               whileTap={{ scale: 0.97 }} whileHover={{ y: -2 }}
-              className="relative overflow-hidden rounded-2xl h-24 flex items-center px-6 gap-5 group shadow-sm"
+              className="group relative flex h-24 shrink-0 items-center gap-5 overflow-hidden rounded-2xl px-6 shadow-sm transition-shadow hover:shadow-md md:h-28 md:px-7"
               style={{ background: "#FDFAF6", border: "1px solid rgba(44,24,16,0.1)" }}>
               <div className={`absolute left-0 top-0 h-full w-1 bg-gradient-to-b ${btn.gradient} rounded-l-2xl`} />
               <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${btn.gradient} flex items-center justify-center shrink-0 ml-2`}>
@@ -1107,7 +1268,7 @@ function HomeScreen({ onNavigate, onNavigateColorSuggestion, user, onUserClick }
         })}
       </div>
 
-      <div className="pb-10 flex justify-center">
+      <div className="hidden shrink-0 justify-center pb-6 md:flex md:pb-8">
         <p className="text-xs text-muted-foreground tracking-widest uppercase opacity-60" style={{ fontFamily: "'DM Sans', sans-serif" }}>
           Designed for you
         </p>
@@ -1149,8 +1310,9 @@ function SubScreen({ title, subtitle, accentColor, onBack, headerRight, children
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col h-full bg-background">
-      <div className="flex items-center gap-3 px-5 pt-14 pb-5 shrink-0" style={{ borderBottom: "1px solid rgba(44,24,16,0.08)" }}>
+    <div className="flex h-full flex-col bg-background">
+      <div className="mobile-safe-x mobile-safe-top w-full shrink-0 pb-5 pt-8 md:mx-auto md:max-w-7xl md:px-8 md:pb-6 md:pt-8" style={{ borderBottom: "1px solid rgba(44,24,16,0.08)" }}>
+      <div className="flex items-center gap-3">
         <button onClick={onBack} className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "rgba(44,24,16,0.06)" }}>
           <ArrowLeft size={18} color="#2C1810" strokeWidth={1.8} />
         </button>
@@ -1160,7 +1322,10 @@ function SubScreen({ title, subtitle, accentColor, onBack, headerRight, children
         </div>
         {headerRight}
       </div>
-      <div className="flex-1 overflow-auto">{children}</div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <div className="mx-auto min-h-full w-full max-w-7xl">{children}</div>
+      </div>
     </div>
   );
 }
@@ -1233,13 +1398,16 @@ function AnalysisRow({ item, onDelete, onColorClick, onImageClick, isNew }: {
         </div>
 
         {/* Color swatches */}
-        <div className="flex gap-1 mt-2">
+        <div className="mt-2 grid grid-cols-4 gap-1 max-[380px]:grid-cols-3 xl:grid-cols-8">
           {item.colors.map((c) => (
             <button
               key={c}
               onClick={() => onColorClick?.(c)}
-              className="rounded-full active:scale-90 transition-transform"
-              style={{ width: 18, height: 18, backgroundColor: c, border: "1.5px solid rgba(255,255,255,0.7)", boxShadow: "0 1px 3px rgba(0,0,0,0.12)" }}
+              type="button"
+              aria-label={`選擇色票 ${colorFamilyName(c)} ${c.toUpperCase()}`}
+              title={`${colorFamilyName(c)} ${c.toUpperCase()}`}
+              className="h-11 w-9 rounded-full transition-transform active:scale-90"
+              style={{ backgroundColor: c, border: "1.5px solid rgba(255,255,255,0.7)", boxShadow: "0 1px 3px rgba(0,0,0,0.12)" }}
             />
           ))}
         </div>
@@ -1398,10 +1566,27 @@ function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
  * 【空狀態】
  * 當沒有分析記錄時，顯示引導訊息和新增按鈕
  */
-function ColorAnalysisScreen({ onBack, user, analyses, onAdd, onDelete, onColorClick, onImageClick }: {
+function RemoteDataNotice({ state, onRetry }: { state: RemoteDataState; onRetry: () => void }) {
+  if (state === "loading") {
+    return <p className="px-6 py-12 text-center text-sm text-[#8A6F5E]">正在載入資料…</p>;
+  }
+  if (state === "error") {
+    return (
+      <div className="flex flex-col items-center gap-3 px-6 py-12 text-center">
+        <p className="text-sm text-[#8A6F5E]">資料載入失敗，請確認連線後重試。</p>
+        <button type="button" onClick={onRetry} className="rounded-xl bg-[#8B3A52] px-4 py-2 text-sm text-white">重新載入</button>
+      </div>
+    );
+  }
+  return null;
+}
+
+function ColorAnalysisScreen({ onBack, user, analyses, loadState, onReload, onAdd, onDelete, onColorClick, onImageClick }: {
   onBack: () => void;
   user: UserAccount | null;
   analyses: ColorAnalysis[];
+  loadState: RemoteDataState;
+  onReload: () => void;
   onAdd: (a: ColorAnalysis) => void;
   onDelete: (id: number) => void;
   onColorClick: (color: string) => void;
@@ -1429,14 +1614,18 @@ function ColorAnalysisScreen({ onBack, user, analyses, onAdd, onDelete, onColorC
     <>
       <SubScreen title="個人色彩分析" subtitle="Personal Color Analysis" accentColor="#C4856A" onBack={onBack} headerRight={addBtn}>
         {analyses.length > 0 ? (
-          <div className="px-5 py-5 flex flex-col gap-3">
+          <div className="mobile-safe-x py-5 md:px-8 md:py-8">
             <p className="text-xs tracking-widest uppercase mb-1" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
               {analyses.length} 筆分析紀錄 • 點擊色票查看配色
             </p>
-            {analyses.map((item) => (
-              <AnalysisRow key={item.id} item={item} onDelete={onDelete} onColorClick={onColorClick} onImageClick={onImageClick} isNew={item.id === newestId} />
-            ))}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4">
+              {analyses.map((item) => (
+                <AnalysisRow key={item.id} item={item} onDelete={onDelete} onColorClick={onColorClick} onImageClick={onImageClick} isNew={item.id === newestId} />
+              ))}
+            </div>
           </div>
+        ) : loadState === "loading" || loadState === "error" ? (
+          <RemoteDataNotice state={loadState} onRetry={onReload} />
         ) : (
           <div className="flex flex-col items-center justify-center h-full px-8 gap-6">
             <div className="w-24 h-24 rounded-full flex items-center justify-center" style={{ background: "#EDE4D8" }}>
@@ -1503,9 +1692,11 @@ function ColorAnalysisScreen({ onBack, user, analyses, onAdd, onDelete, onColorC
  * 【空狀態】
  * 根據當前篩選條件顯示對應的空狀態訊息
  */
-function WardrobeScreen({ onBack, wardrobe, onAdd, onDelete, onTopImageClick, onBottomImageClick }: {
+function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete, onTopImageClick, onBottomImageClick }: {
   onBack: () => void;
   wardrobe: WardrobeItem[];
+  loadState: RemoteDataState;
+  onReload: () => void;
   onAdd: (item: WardrobeItem) => void;
   onDelete: (id: number) => void;
   onTopImageClick: () => void;
@@ -1533,9 +1724,9 @@ function WardrobeScreen({ onBack, wardrobe, onAdd, onDelete, onTopImageClick, on
   return (
     <>
       <SubScreen title="我的衣櫥" subtitle="My Wardrobe" accentColor="#8B3A52" onBack={onBack}>
-        <div className="flex flex-col h-full">
+        <div className="flex min-h-full flex-col">
           {/* Filter buttons */}
-          <div className="flex gap-2 px-5 py-4 shrink-0" style={{ borderBottom: "1px solid rgba(44,24,16,0.06)" }}>
+          <div className="mobile-safe-x flex shrink-0 gap-2 py-4 md:px-8" style={{ borderBottom: "1px solid rgba(44,24,16,0.06)" }}>
             <button
               onClick={() => setFilter("all")}
               className={`flex-1 rounded-xl py-2.5 transition-all ${filter === "all" ? "shadow-sm" : ""}`}
@@ -1591,22 +1782,26 @@ function WardrobeScreen({ onBack, wardrobe, onAdd, onDelete, onTopImageClick, on
           </div>
 
           {/* Content area */}
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1">
             {filteredItems.length > 0 ? (
-              <div className="px-5 py-5 flex flex-col gap-3">
+              <div className="mobile-safe-x py-5 md:px-8 md:py-8">
                 <p className="text-xs tracking-widest uppercase mb-1" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
                   {filteredItems.length} 件{filter === "top" ? "上衣" : filter === "bottom" ? "下著" : "單品"}
                 </p>
-                {filteredItems.map((item) => (
-                  <WardrobeRow
-                    key={item.id}
-                    item={item}
-                    onDelete={onDelete}
-                    onImageClick={item.category === "top" ? onTopImageClick : onBottomImageClick}
-                    isNew={item.id === newestId}
-                  />
-                ))}
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-3">
+                  {filteredItems.map((item) => (
+                    <WardrobeRow
+                      key={item.id}
+                      item={item}
+                      onDelete={onDelete}
+                      onImageClick={item.category === "top" ? onTopImageClick : onBottomImageClick}
+                      isNew={item.id === newestId}
+                    />
+                  ))}
+                </div>
               </div>
+            ) : loadState === "loading" || loadState === "error" ? (
+              <RemoteDataNotice state={loadState} onRetry={onReload} />
             ) : (
               <div className="flex flex-col items-center justify-center h-full px-8 gap-6">
                 <div className="w-24 h-24 rounded-full flex items-center justify-center" style={{ background: "#EDE4D8" }}>
@@ -1675,13 +1870,17 @@ function ColorPaletteStrip({ palette }: { palette: string[] }) {
   return (
     <div className="rounded-2xl overflow-hidden shadow-sm">
       <div className="flex h-16">
-        {palette.map((c, i) => (
-          <div key={i} className="flex-1 flex items-end justify-center pb-2" style={{ backgroundColor: c }}>
-            <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 9, color: "rgba(255,255,255,0.75)", letterSpacing: "0.04em" }}>
-              {c.toUpperCase()}
-            </span>
-          </div>
-        ))}
+        {palette.map((c, i) => {
+          const [r, g, b] = hexToRgb(c);
+          const lightColor = (r * 0.2126 + g * 0.7152 + b * 0.0722) > 160;
+          return (
+            <div key={i} className="flex min-w-0 flex-1 items-end justify-center pb-2" style={{ backgroundColor: c }} aria-label={`色票 ${colorFamilyName(c)} ${c.toUpperCase()}`}>
+              <span className="truncate px-0.5 text-[0.65rem]" style={{ fontFamily: "'DM Sans', sans-serif", color: lightColor ? "#5A3A2E" : "#FFFFFF", textShadow: lightColor ? "none" : "0 1px 2px rgba(0,0,0,0.28)", letterSpacing: "0.02em" }}>
+                {c.toUpperCase()}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1711,7 +1910,10 @@ function ColorPaletteStrip({ palette }: { palette: string[] }) {
 function WardrobeThumb({ item, onClick, selected }: { item: WardrobeItem; onClick?: () => void; selected?: boolean }) {
   return (
     <motion.button
+      type="button"
       onClick={onClick}
+      aria-pressed={!!selected}
+      aria-label={`${selected ? "已選取" : "選擇"}${item.category === "top" ? "上衣" : "下著"}，${colorFamilyName(item.dominantColor)} ${item.dominantColor}`}
       whileTap={{ scale: 0.94 }}
       className="rounded-2xl overflow-hidden aspect-square relative"
       style={{
@@ -1721,8 +1923,21 @@ function WardrobeThumb({ item, onClick, selected }: { item: WardrobeItem; onClic
       }}
     >
       <img src={item.imageUrl} alt={item.category} className="w-full h-full object-cover" />
+      <div className="absolute bottom-1.5 left-1.5 rounded-full bg-white/90 px-2 py-1 text-[10px] text-[#5A3A2E]">{colorFamilyName(item.dominantColor)} {item.dominantColor.toUpperCase()}</div>
       <div className="absolute bottom-1.5 right-1.5 w-4 h-4 rounded-full border-2 border-white shadow-sm" style={{ backgroundColor: item.dominantColor }} />
     </motion.button>
+  );
+}
+
+function GarmentSilhouette({ category, color }: { category: "top" | "bottom"; color: string }) {
+  return (
+    <svg viewBox="0 0 160 200" aria-hidden="true" className="h-full w-full drop-shadow-md">
+      {category === "top" ? (
+        <path d="M52 18 30 28 10 64l25 15 12-17v111h66V62l12 17 25-15-20-36-22-10c-5 13-13 20-28 20S57 31 52 18Z" fill={color} stroke="rgba(255,255,255,.8)" strokeWidth="3" strokeLinejoin="round" />
+      ) : (
+        <path d="M36 18h88l-7 70-10 91H78l-4-69-5 69H31L40 88l-4-70Z" fill={color} stroke="rgba(255,255,255,.8)" strokeWidth="3" strokeLinejoin="round" />
+      )}
+    </svg>
   );
 }
 
@@ -1775,8 +1990,9 @@ function WardrobeThumb({ item, onClick, selected }: { item: WardrobeItem; onClic
  * - 使用顏色距離演算法判斷顏色是否匹配
  * - 空狀態提示使用者新增對應資料
  */
-function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wardrobe }: {
+function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, initialMode, wardrobe }: {
   onBack: () => void;
+  onStartTryOn: (topId: number, bottomId: number) => void;
   analyses: ColorAnalysis[];
   initialColor?: string;
   initialMode?: SuggestionMode;
@@ -1789,89 +2005,71 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
   // 配色推薦 API 狀態
   const [recommendedPalettes, setRecommendedPalettes] = useState<string[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
+  const [simulatedColor, setSimulatedColor] = useState<string | null>(null);
+  const [matchError, setMatchError] = useState("");
+  const [wishlistMessage, setWishlistMessage] = useState("");
 
   // 穿搭預覽狀態
   const [previewTop, setPreviewTop] = useState<WardrobeItem | null>(null);
   const [previewBottom, setPreviewBottom] = useState<WardrobeItem | null>(null);
 
-  // 🆕 AI 虛擬試穿狀態
-  const [isGeneratingTryOn, setIsGeneratingTryOn] = useState(false);
-  const [tryOnResultUrl, setTryOnResultUrl] = useState<string | null>(null);
-
   const tops = wardrobe.filter(w => w.category === "top");
   const bottoms = wardrobe.filter(w => w.category === "bottom");
+
+  useEffect(() => {
+    if (selectedItem && !wardrobe.some((item) => item.id === selectedItem.id)) {
+      setSelectedItem(null);
+      setPreviewTop(null);
+      setPreviewBottom(null);
+    }
+    if (previewTop && !wardrobe.some((item) => item.id === previewTop.id)) setPreviewTop(null);
+    if (previewBottom && !wardrobe.some((item) => item.id === previewBottom.id)) setPreviewBottom(null);
+  }, [wardrobe, selectedItem, previewTop, previewBottom]);
 
   function switchMode(m: SuggestionMode) {
     setMode(m);
     setSelectedItem(null);
     setPreviewTop(null);
     setPreviewBottom(null);
-    setTryOnResultUrl(null); // 切換模式時清空 AI 圖
     if (m !== "personal") setSelectedColor(null);
   }
 
   function handleBack() {
     if (mode === "personal" && selectedColor) {
       setSelectedColor(null);
+      setSelectedItem(null);
       setPreviewTop(null);
       setPreviewBottom(null);
-      setTryOnResultUrl(null);
     } else if ((mode === "top" || mode === "bottom") && selectedItem) {
       setSelectedItem(null);
       setPreviewTop(null);
       setPreviewBottom(null);
-      setTryOnResultUrl(null);
     } else {
       onBack();
     }
   }
 
-  // 當選擇其他衣服放入預覽時，清除前一次的 AI 試穿結果
+  // 更新配色建議畫面中的平面穿搭預覽。
   function handleSelectPreview(item: WardrobeItem, type: 'top' | 'bottom') {
-    setTryOnResultUrl(null);
-    if (type === 'top') setPreviewTop(item);
-    if (type === 'bottom') setPreviewBottom(item);
+    if (type === 'top') setPreviewTop((current) => current?.id === item.id ? null : item);
+    if (type === 'bottom') setPreviewBottom((current) => current?.id === item.id ? null : item);
   }
 
-  // 🆕 呼叫 AI 虛擬試穿 API
-  async function handleAITryOn() {
-    // 使用最新的一筆色彩分析照片作為模特兒
-    const humanImgUrl = analyses.length > 0 ? analyses[0].imageUrl : null;
-    
-    if (!humanImgUrl) {
-      alert("請先完成一次個人色彩分析，系統將使用該照片作為您的專屬試穿模特兒！");
-      return;
-    }
-
-    // 決定要試穿哪一件 (優先試穿上衣，若無則試穿下著)
-    const targetGarment = previewTop || previewBottom;
-    if (!targetGarment) return;
-    
-    const category = previewTop ? "upper_body" : "lower_body";
-
-    setIsGeneratingTryOn(true);
-    try {
-      // 呼叫我們剛寫好的 API
-      const res = await api.generateTryOn(humanImgUrl, targetGarment.imageUrl, category);
-      
-      if (res.success && res.result_image_url) {
-        setTryOnResultUrl(res.result_image_url);
-      } else {
-        alert("AI 試穿生成失敗：" + (res.message || "未知錯誤"));
-      }
-    } catch (e) {
-      console.error("試穿發生錯誤", e);
-      alert("網路連線異常，請稍後再試或檢查後端伺服器");
-    } finally {
-      setIsGeneratingTryOn(false);
-    }
+  function choosePaletteMatchedTop(item: WardrobeItem) {
+    setSelectedItem(item);
+    setPreviewTop(item);
+    setPreviewBottom(null);
+    setSimulatedColor(null);
   }
 
   // 呼叫後端 API 取得配色建議
   useEffect(() => {
+    let cancelled = false;
     async function fetchMatches() {
       let targetColor = "";
-      if (mode === "personal" && selectedColor) {
+      if (mode === "personal" && selectedItem) {
+        targetColor = selectedItem.dominantColor;
+      } else if (mode === "personal" && selectedColor) {
         targetColor = selectedColor;
       } else if ((mode === "top" || mode === "bottom") && selectedItem) {
         targetColor = selectedItem.dominantColor;
@@ -1879,53 +2077,68 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
 
       if (!targetColor) {
         setRecommendedPalettes([]);
+        setSimulatedColor(null);
+        setIsLoadingMatches(false);
         return;
       }
 
       const direction = mode === "bottom" ? "sub_to_main" : "main_to_sub";
 
       setIsLoadingMatches(true);
+      setMatchError("");
       try {
         const response = await api.getColorMatches(targetColor, direction);
-        if (response.success && response.recommendations.length > 0) {
-          const colors = response.recommendations.map((r: any) => r.color);
-          setRecommendedPalettes(colors);
-        } else {
-          setRecommendedPalettes([]);
-        }
+        if (cancelled) return;
+        const colors = response.success
+          ? response.recommendations.map((recommendation: any) => recommendation.color)
+          : [];
+        setRecommendedPalettes(colors);
+
+        setSimulatedColor(colors[0] || null);
       } catch (error) {
+        if (cancelled) return;
         console.error("取得配色建議失敗", error);
         setRecommendedPalettes([]);
+        setSimulatedColor(null);
+        setMatchError(error instanceof Error ? error.message : "暫時無法取得衣櫥配色建議");
       } finally {
-        setIsLoadingMatches(false);
+        if (!cancelled) setIsLoadingMatches(false);
       }
     }
 
-    fetchMatches();
-  }, [selectedItem, selectedColor, mode]); 
+    void fetchMatches();
+    return () => { cancelled = true; };
+  }, [selectedItem, selectedColor, mode]);
 
   // 自動放入預覽
   useEffect(() => {
     if (mode === "top" && selectedItem) {
       setPreviewTop(selectedItem);
-      setTryOnResultUrl(null);
     } else if (mode === "bottom" && selectedItem) {
       setPreviewBottom(selectedItem);
-      setTryOnResultUrl(null);
     }
   }, [selectedItem, mode]);
 
-  // 各模式過濾邏輯
-  const personalMatchingTops = selectedColor ? tops.filter(t => isColorMatch(t.dominantColor, recommendedPalettes)) : [];
-  const personalMatchingBottoms = selectedColor ? bottoms.filter(b => isColorMatch(b.dominantColor, recommendedPalettes)) : [];
+  const personalPaletteTops = selectedColor ? tops.filter((item) => isColorMatch(item.dominantColor, [selectedColor])) : [];
+  const personalMatchingTops = personalPaletteTops.filter((item) => closestColorDistance(item.dominantColor, [selectedColor!]) === 0);
+  const personalSimilarTops = personalPaletteTops.filter((item) => closestColorDistance(item.dominantColor, [selectedColor!]) > 0);
+  const oppositeWardrobe = mode === "bottom" ? tops : bottoms;
+  const complementaryItems = selectedItem
+    ? oppositeWardrobe.filter((item) => isColorMatch(item.dominantColor, recommendedPalettes))
+    : [];
+  const complementaryDirectItems = complementaryItems.filter((item) => closestColorDistance(item.dominantColor, recommendedPalettes) === 0);
+  const complementarySimilarItems = complementaryItems.filter((item) => closestColorDistance(item.dominantColor, recommendedPalettes) > 0);
+  const suggestedBottoms = selectedItem && (mode === "top" || mode === "personal") ? complementaryItems : [];
+  const suggestedTops = selectedItem && mode === "bottom" ? complementaryItems : [];
+  const wantedCategory: "top" | "bottom" = mode === "bottom" ? "top" : "bottom";
+  const missingColors = selectedItem ? recommendedPalettes.filter((color) => !oppositeWardrobe.some((item) => isColorMatch(item.dominantColor, [color]))) : [];
 
-  const suggestedBottoms = (selectedItem && mode === "top")
-    ? bottoms.filter(b => isColorMatch(b.dominantColor, recommendedPalettes))
-    : [];
-    
-  const suggestedTops = (selectedItem && mode === "bottom")
-    ? tops.filter(t => isColorMatch(t.dominantColor, recommendedPalettes))
-    : [];
+  async function saveMissingColor(category: "top" | "bottom", color: string, basedOn?: string) {
+    try {
+      const result = await api.addWishlistItem(category, color, basedOn);
+      setWishlistMessage(result.already_exists ? "這個顏色已在缺件清單" : "已加入缺件清單");
+    } catch (cause) { setWishlistMessage(cause instanceof Error ? cause.message : "無法儲存缺件清單"); }
+  }
 
   const tabs: { id: SuggestionMode; label: string; sub: string }[] = [
     { id: "personal", label: "個人色彩", sub: "Personal" },
@@ -1935,15 +2148,15 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
 
   return (
     <SubScreen title="配色建議" subtitle="Color Coordination" accentColor="#B87355" onBack={handleBack}>
-      <div className="flex flex-col h-full">
+      <div className="flex min-h-full flex-col">
 
         {/* ── Tab bar ── */}
-        <div className="flex gap-1.5 px-5 py-3 shrink-0" style={{ borderBottom: "1px solid rgba(44,24,16,0.07)" }}>
+        <div className="mobile-safe-x sticky top-0 z-10 mx-auto flex w-full shrink-0 gap-1.5 bg-[#F7F2EC] py-3 md:max-w-7xl md:px-8 md:py-4" style={{ borderBottom: "1px solid rgba(44,24,16,0.07)" }}>
           {tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => switchMode(tab.id)}
-              className="flex-1 rounded-xl py-2.5 flex flex-col items-center transition-all"
+              className="flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center rounded-xl px-1 py-2.5 transition-all"
               style={{
                 background: mode === tab.id
                   ? "linear-gradient(135deg, #B87355 0%, #C4856A 100%)"
@@ -1955,9 +2168,8 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 fontWeight: mode === tab.id ? 500 : 400,
                 color: mode === tab.id ? "#FDFAF6" : "#8A6F5E",
               }}>{tab.label}</span>
-              <span style={{
+              <span className="text-center text-[0.68rem] leading-tight" style={{
                 fontFamily: "'DM Sans', sans-serif",
-                fontSize: 9,
                 color: mode === tab.id ? "rgba(255,255,255,0.65)" : "#C4A898",
                 letterSpacing: "0.04em",
               }}>{tab.sub}</span>
@@ -1966,17 +2178,18 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
         </div>
 
         {/* ── Content ── */}
-        <div className="flex-1 overflow-auto px-5 py-5 flex flex-col gap-5">
+        <div className="mobile-safe-x min-w-0 flex-1 py-5 md:mx-auto md:w-full md:max-w-7xl md:px-8 md:py-8">
+        <div className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] xl:items-start xl:gap-8">
 
           {/* 穿搭預覽區塊 */}
           {(selectedColor || selectedItem) && (
-            <div className="mb-2 shrink-0">
+            <div className="mb-2 min-w-0 shrink-0 xl:sticky xl:top-4 xl:self-start">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>穿搭預覽</p>
                 <button onClick={() => { 
-                    if(mode === 'top') { setPreviewBottom(null); setTryOnResultUrl(null); }
-                    else if(mode === 'bottom') { setPreviewTop(null); setTryOnResultUrl(null); }
-                    else { setPreviewTop(null); setPreviewBottom(null); setTryOnResultUrl(null); }
+                    if(mode === 'top') setPreviewBottom(null);
+                    else if(mode === 'bottom') setPreviewTop(null);
+                    else { setPreviewTop(null); setPreviewBottom(null); setSelectedItem(null); }
                   }}
                   className="text-xs px-3 py-1.5 rounded-full"
                   style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355", background: "rgba(184,115,85,0.1)" }}>
@@ -1984,100 +2197,97 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </button>
               </div>
               
-              <div className="flex flex-col items-center justify-center w-full h-72 rounded-2xl relative overflow-hidden shadow-inner"
+              <div className="relative flex h-72 w-full flex-col items-center justify-center overflow-hidden rounded-2xl shadow-inner md:h-96"
                    style={{ background: "#EDE4D8", border: "1px solid rgba(44,24,16,0.08)" }}>
                 
-                {/* 狀態一：成功產生 AI 圖片 */}
-                {tryOnResultUrl ? (
-                  <motion.img 
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    src={tryOnResultUrl.startsWith('http') ? tryOnResultUrl : `http://127.0.0.1:5001${tryOnResultUrl}`}
-                    alt="AI 虛擬試穿結果" 
-                    className="w-full h-full object-cover z-20 absolute inset-0" 
-                  />
-                ) : (
-                  <>
-                    {/* 狀態二：2D CSS 拼貼預覽 (等待觸發 AI) */}
-                    {(!previewTop && !previewBottom) && (
+                    {(!previewTop && !previewBottom && !(mode === "personal" && selectedColor) && !(selectedItem && (mode === "top" || mode === "bottom"))) && (
                       <div className="flex flex-col items-center gap-2 opacity-50">
                         <ShoppingBag size={32} color="#8A6F5E" />
                         <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>點擊下方服裝進行搭配</span>
                       </div>
                     )}
 
-                    {previewTop && (
+                    {previewTop ? (
                       <img 
                         src={previewTop.imageUrl} 
                         alt="上衣預覽"
                         className="absolute top-4 w-[55%] object-contain z-10 drop-shadow-md transition-all duration-300" 
                         style={{ maxHeight: '55%' }} 
                       />
-                    )}
+                    ) : mode === "personal" && selectedColor ? (
+                      <div className="absolute top-4 z-10 h-[55%] w-[45%]"><GarmentSilhouette category="top" color={selectedColor} /></div>
+                    ) : mode === "bottom" && selectedItem ? (
+                      <div className="absolute top-4 z-10 h-[55%] w-[45%]"><GarmentSilhouette category="top" color={simulatedColor || recommendedPalettes[0] || "#C4856A"} /></div>
+                    ) : null}
                     
-                    {previewBottom && (
+                    {previewBottom ? (
                       <img 
                         src={previewBottom.imageUrl} 
                         alt="下著預覽"
                         className="absolute bottom-4 w-[50%] object-contain z-0 drop-shadow-sm transition-all duration-300" 
                         style={{ maxHeight: '60%' }} 
                       />
+                    ) : (mode === "personal" && selectedColor) || (mode === "top" && selectedItem) ? (
+                      <div className="absolute bottom-4 z-0 h-[60%] w-[40%]"><GarmentSilhouette category="bottom" color={simulatedColor || recommendedPalettes[0] || "#9B8274"} /></div>
+                    ) : null}
+
+                    {((mode === "personal" && selectedColor && !selectedItem) || (selectedItem && !previewBottom && mode !== "bottom")) && (
+                      <span className="absolute bottom-2 right-3 z-20 rounded-full bg-white/75 px-2.5 py-1 text-[10px] text-[#8A6F5E]">搭配示意圖</span>
                     )}
 
-                    {/* AI 生成按鈕浮水印 */}
-                    {(previewTop || previewBottom) && (
-                      <button 
-                        onClick={handleAITryOn} 
-                        disabled={isGeneratingTryOn}
-                        className="absolute bottom-4 z-30 px-5 py-2.5 rounded-full backdrop-blur-md flex items-center gap-2 transition-transform active:scale-95 shadow-lg"
-                        style={{ 
-                          background: isGeneratingTryOn ? "rgba(44,24,16,0.8)" : "linear-gradient(135deg, #8B3A52 0%, #C4856A 100%)",
-                          color: "#FDFAF6"
-                        }}
-                      >
-                        {isGeneratingTryOn ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-                        <span className="text-sm" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 500 }}>
-                          {isGeneratingTryOn ? "AI 魔法生成中..." : "✨ 實穿給我看"}
-                        </span>
-                      </button>
-                    )}
-                  </>
-                )}
               </div>
+              <button
+                type="button"
+                disabled={!previewTop || !previewBottom}
+                onClick={() => previewTop && previewBottom && onStartTryOn(previewTop.id, previewBottom.id)}
+                className="mt-3 w-full rounded-xl px-4 py-3 text-sm font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ background: "linear-gradient(135deg, #8B3A52 0%, #C4856A 100%)" }}
+              >
+                使用實際衣物進入 AI 虛擬試衣
+              </button>
+              {(!previewTop || !previewBottom) && <p className="mt-1 text-center text-[11px] text-[#9B8274]">選好衣櫥上衣與下著後即可帶入；色彩剪影只用於搭配示意。</p>}
             </div>
           )}
 
+          <div className={`min-w-0 ${selectedColor || selectedItem ? "" : "xl:col-span-2"}`}>
+          <div className="flex min-w-0 flex-col gap-5 xl:gap-6">
           {/* ════ PERSONAL COLOR MODE ════ */}
           {mode === "personal" && !selectedColor && (
             <>
               <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
                 選擇分析記錄中的色票作為主色
               </p>
-              {analyses.length > 0 ? analyses.map((analysis) => (
-                <div key={analysis.id} className="flex flex-col gap-3">
-                  <div className="rounded-2xl p-3 flex items-center gap-3"
-                    style={{ background: "#FDFAF6", border: "1px solid rgba(44,24,16,0.08)" }}>
-                    <div className="w-14 h-18 rounded-xl overflow-hidden shrink-0" style={{ background: "#EDE4D8", height: 68 }}>
-                      <img src={analysis.imageUrl} alt={analysis.type} className="w-full h-full object-cover" />
-                    </div>
-                    <span className="text-base" style={{ fontFamily: "'Playfair Display', serif", fontWeight: 500, color: "#2C1810" }}>
-                      {analysis.type}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {analysis.colors.map((color) => (
-                      <motion.button
-                        key={color}
-                        onClick={() => setSelectedColor(color)}
-                        whileTap={{ scale: 0.88 }}
-                        className="aspect-square rounded-xl shadow-sm"
-                        style={{ backgroundColor: color, border: "2px solid rgba(255,255,255,0.6)" }}
-                        title={color}
-                      />
-                    ))}
-                  </div>
+              {analyses.length > 0 ? (
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {analyses.map((analysis) => (
+                    <article key={analysis.id} className="flex min-w-0 flex-col gap-3 rounded-2xl border border-black/5 bg-[#FDFAF6] p-3 shadow-sm md:p-4">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="h-[68px] w-14 shrink-0 overflow-hidden rounded-xl bg-[#EDE4D8]">
+                          <img src={analysis.imageUrl} alt={analysis.type} className="h-full w-full object-cover" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-base font-medium text-[#2C1810]" style={{ fontFamily: "'Playfair Display', serif" }}>{analysis.type}</p>
+                          <p className="mt-1 text-xs text-[#8A6F5E]">分析日期 · {analysis.date.replaceAll("-", ".")}</p>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-8">
+                        {analysis.colors.map((color) => (
+                          <motion.button
+                            key={color}
+                            type="button"
+                            onClick={() => setSelectedColor(color)}
+                            whileTap={{ scale: 0.88 }}
+                            className="aspect-square rounded-xl shadow-sm"
+                            style={{ backgroundColor: color, border: "2px solid rgba(255,255,255,0.6)" }}
+                            aria-label={`選擇色票 ${colorFamilyName(color)} ${color.toUpperCase()}`}
+                            title={`${colorFamilyName(color)} ${color.toUpperCase()}`}
+                          />
+                        ))}
+                      </div>
+                    </article>
+                  ))}
                 </div>
-              )) : (
+              ) : (
                 <div className="rounded-2xl p-6 text-center" style={{ background: "#FDFAF6", border: "1px solid rgba(44,24,16,0.08)" }}>
                   <Sparkles size={28} color="#C4A898" strokeWidth={1} />
                   <p className="text-sm mt-3" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>尚無個人色彩分析紀錄</p>
@@ -2092,7 +2302,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>主色</p>
-                  <button onClick={() => setSelectedColor(null)}
+                  <button onClick={() => { setSelectedColor(null); setSelectedItem(null); setPreviewTop(null); setPreviewBottom(null); }}
                     className="text-xs px-3 py-1.5 rounded-full"
                     style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355", background: "rgba(184,115,85,0.1)" }}>
                     重新選擇
@@ -2112,49 +2322,80 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 <ColorPaletteStrip palette={recommendedPalettes} />
               </div>
 
-              <div>
-                <p className="text-xs tracking-widest uppercase mb-3" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
-                  我的衣櫥 · 符合此配色
-                </p>
-                {personalMatchingTops.length === 0 && personalMatchingBottoms.length === 0 ? (
-                  <div className="rounded-2xl p-5 text-center" style={{ background: "#FDFAF6", border: "1.5px dashed rgba(44,24,16,0.15)" }}>
-                    <ShoppingBag size={28} color="#C4A898" strokeWidth={1} />
-                    <p className="text-sm mt-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>衣櫥中暫無符合此配色的服裝</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-4">
+                {!selectedItem ? (
+                  <>
+                    <div>
+                      <p className="mb-1 text-xs tracking-widest uppercase text-[#8A6F5E]">先從衣櫥選一件符合這個色票的上衣</p>
+                      <p className="mb-3 text-xs leading-relaxed text-[#9B8274]">系統目前依每件衣服的第一主色比對；相同色與相近色會分開顯示。</p>
+                    </div>
                     {personalMatchingTops.length > 0 && (
                       <div>
-                        <p className="text-xs mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355" }}>上衣 ({personalMatchingTops.length})</p>
-                        <div className="grid grid-cols-3 gap-2">
-                          {personalMatchingTops.map(item => (
-                            <WardrobeThumb 
-                              key={item.id} 
-                              item={item} 
-                              selected={previewTop?.id === item.id}
-                              onClick={() => handleSelectPreview(item, 'top')} 
-                            />
-                          ))}
+                        <p className="mb-2 text-xs text-[#8B3A52]">色票相符（{personalMatchingTops.length}）</p>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                          {personalMatchingTops.map((item) => <div key={item.id} className="relative"><WardrobeThumb item={item} selected={selectedItem?.id === item.id} onClick={() => choosePaletteMatchedTop(item)} /><span className="absolute bottom-2 left-2 rounded-full bg-white/90 px-2 py-1 text-[10px] text-[#5A3A2E]">色票完全相同</span></div>)}
                         </div>
                       </div>
                     )}
-                    {personalMatchingBottoms.length > 0 && (
+                    {personalSimilarTops.length > 0 && (
                       <div>
-                        <p className="text-xs mb-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355" }}>下著 ({personalMatchingBottoms.length})</p>
-                        <div className="grid grid-cols-3 gap-2">
-                          {personalMatchingBottoms.map(item => (
-                            <WardrobeThumb 
-                              key={item.id} 
-                              item={item} 
-                              selected={previewBottom?.id === item.id}
-                              onClick={() => handleSelectPreview(item, 'bottom')} 
-                            />
-                          ))}
+                        <p className="mb-2 text-xs text-[#B87355]">相近色（{personalSimilarTops.length}）</p>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                          {personalSimilarTops.map((item) => <div key={item.id} className="relative"><WardrobeThumb item={item} selected={selectedItem?.id === item.id} onClick={() => choosePaletteMatchedTop(item)} /><span className="absolute bottom-2 left-2 rounded-full bg-white/90 px-2 py-1 text-[10px] text-[#5A3A2E]">相近色 · 距離 {closestColorDistance(item.dominantColor, [selectedColor || ""]).toFixed(0)}</span></div>)}
                         </div>
                       </div>
                     )}
+                    {!isLoadingMatches && personalMatchingTops.length === 0 && personalSimilarTops.length === 0 && (
+                      <div className="rounded-2xl border border-dashed border-[#C4A898] bg-[#FDFAF6] p-4 text-center">
+                        <p className="text-sm text-[#8A6F5E]">衣櫥中沒有符合或相近的上衣</p>
+                        <p className="mt-1 text-xs leading-relaxed text-[#9B8274]">先看下方的色彩穿搭示意，也可以到衣櫥新增單品。</p>
+                        {selectedColor && <button type="button" onClick={() => void saveMissingColor("top", selectedColor)} className="mt-3 rounded-lg bg-[#8B3A52] px-3 py-2 text-xs text-white">把色票 {selectedColor} 加入上衣缺件清單</button>}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs tracking-widest uppercase text-[#8A6F5E]">已選色票上衣</p>
+                        <p className="mt-1 text-xs text-[#9B8274]">依這件上衣最接近色票的主色，推薦可以搭配的下著。</p>
+                      </div>
+                      <button onClick={() => { setSelectedItem(null); setPreviewTop(null); setPreviewBottom(null); }} className="rounded-full bg-[#F4E9E2] px-3 py-1.5 text-xs text-[#8B3A52]">換一件</button>
+                    </div>
+                    <p className="text-xs text-[#8A6F5E]">衣櫥中的建議下著</p>
+                    {complementaryDirectItems.length > 0 && (
+                      <div>
+                        <p className="mb-2 text-xs text-[#8B3A52]">推薦色相符（{complementaryDirectItems.length}）</p>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                          {complementaryDirectItems.map((item) => <WardrobeThumb key={item.id} item={item} selected={previewBottom?.id === item.id} onClick={() => handleSelectPreview(item, "bottom")} />)}
+                        </div>
+                      </div>
+                    )}
+                    {complementarySimilarItems.length > 0 && (
+                      <div>
+                        <p className="mb-2 text-xs text-[#B87355]">相近色（{complementarySimilarItems.length}）</p>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                          {complementarySimilarItems.map((item) => <WardrobeThumb key={item.id} item={item} selected={previewBottom?.id === item.id} onClick={() => handleSelectPreview(item, "bottom")} />)}
+                        </div>
+                      </div>
+                    )}
+                    {!isLoadingMatches && suggestedBottoms.length === 0 && (
+                      <p className="rounded-xl bg-[#FDFAF6] p-3 text-sm text-[#8A6F5E]">衣櫥裡暫時沒有這些推薦色的下著，可以先用示意圖挑選搭配色。</p>
+                    )}
+                    {missingColors.length > 0 && <div className="rounded-xl bg-[#FDFAF6] p-3"><p className="text-xs text-[#8A6F5E]">推薦色中，這些顏色目前沒有符合或相近的{wantedCategory === "top" ? "上衣" : "下著"}：</p><div className="mt-2 flex flex-wrap gap-2">{missingColors.map((color) => <button key={color} type="button" onClick={() => void saveMissingColor(wantedCategory, color, selectedItem?.dominantColor)} className="flex items-center gap-2 rounded-lg border border-[#E8DDD3] px-2 py-1.5 text-xs text-[#5A3A2E]"><span className="h-4 w-4 rounded-full border border-black/10" style={{ backgroundColor: color }} />{color} · 加入清單</button>)}</div></div>}
+                  </>
+                )}
+                {matchError && <p role="alert" className="text-xs text-red-700">{matchError}</p>}
+                {wishlistMessage && <p role="status" className="text-xs text-[#8B3A52]">{wishlistMessage}</p>}
+                {recommendedPalettes.length > 0 && (
+                  <div>
+                    <p className="mb-2 text-xs text-[#8A6F5E]">可調整示意下著顏色</p>
+                    <div className="flex flex-wrap gap-2">
+                      {recommendedPalettes.map((color) => <button key={color} type="button" onClick={() => { setSimulatedColor(color); setPreviewBottom(null); }} aria-label={`示意下著顏色 ${color}`} className="h-9 w-9 rounded-full border-2 border-white shadow ring-1 ring-[#D8C5B9]" style={{ backgroundColor: color }} />)}
+                    </div>
                   </div>
                 )}
+                <p className="text-[11px] leading-relaxed text-[#9B8274]">這是依色票與衣櫥色彩製作的平面搭配示意。AI 虛擬試衣仍需選擇實際衣物圖片。</p>
               </div>
             </>
           )}
@@ -2171,7 +2412,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </p>
               </div>
               {tops.length > 0 ? (
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
                   {tops.map(item => (
                     <WardrobeThumb key={item.id} item={item} onClick={() => setSelectedItem(item)} />
                   ))}
@@ -2206,7 +2447,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                     <div className="flex items-center gap-2">
                       <div className="w-5 h-5 rounded-full border-2 border-white shadow-sm" style={{ backgroundColor: selectedItem.dominantColor }} />
                       <span className="text-sm" style={{ fontFamily: "'DM Sans', sans-serif", color: "#2C1810" }}>主色</span>
-                      <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>{selectedItem.dominantColor.toUpperCase()}</span>
+                      <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>{colorFamilyName(selectedItem.dominantColor)} · {selectedItem.dominantColor.toUpperCase()}</span>
                     </div>
                     <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#B87355" }}>
                       以此上衣顏色為基礎，建議搭配下著
@@ -2227,25 +2468,17 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 <p className="text-xs mb-3" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#C4A898" }}>
                   下著作為配色，以下為衣櫥中符合的單品
                 </p>
-                {suggestedBottoms.length > 0 ? (
-                  <div className="grid grid-cols-3 gap-2">
-                    {suggestedBottoms.map(item => (
-                      <WardrobeThumb 
-                        key={item.id} 
-                        item={item} 
-                        selected={previewBottom?.id === item.id}
-                        onClick={() => handleSelectPreview(item, 'bottom')} 
-                      />
-                    ))}
-                  </div>
-                ) : (
+                {suggestedBottoms.length === 0 ? (
                   <div className="rounded-2xl p-5 text-center" style={{ background: "#FDFAF6", border: "1.5px dashed rgba(44,24,16,0.15)" }}>
                     <ShoppingBag size={28} color="#C4A898" strokeWidth={1} />
                     <p className="text-sm mt-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
-                      衣櫥中暫無符合此主色的下著
+                      衣櫥中暫無符合推薦色的下著，先用色彩示意挑選搭配
                     </p>
                   </div>
-                )}
+                ) : null}
+                {complementaryDirectItems.length > 0 && <div><p className="mb-2 text-xs text-[#8B3A52]">推薦色相符</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">{complementaryDirectItems.map(item => <WardrobeThumb key={item.id} item={item} selected={previewBottom?.id === item.id} onClick={() => handleSelectPreview(item, "bottom")} />)}</div></div>}
+                {complementarySimilarItems.length > 0 && <div className="mt-3"><p className="mb-2 text-xs text-[#B87355]">相近色（RGB 距離小於 80）</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">{complementarySimilarItems.map(item => <WardrobeThumb key={item.id} item={item} selected={previewBottom?.id === item.id} onClick={() => handleSelectPreview(item, "bottom")} />)}</div></div>}
+                {recommendedPalettes.length > 0 && <div className="mt-3"><p className="mb-2 text-xs text-[#8A6F5E]">示意下著顏色</p><div className="flex flex-wrap gap-2">{recommendedPalettes.map(color => <button key={color} type="button" onClick={() => { setSimulatedColor(color); setPreviewBottom(null); }} aria-label={`示意下著顏色 ${color}`} className="h-9 w-9 rounded-full border-2 border-white shadow ring-1 ring-[#D8C5B9]" style={{ backgroundColor: color }} />)}</div><p className="mt-2 text-[11px] text-[#9B8274]">平面搭配示意不會送入 AI 試衣；AI 試衣需實際衣物。</p></div>}
               </div>
             </>
           )}
@@ -2262,7 +2495,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 </p>
               </div>
               {bottoms.length > 0 ? (
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
                   {bottoms.map(item => (
                     <WardrobeThumb key={item.id} item={item} onClick={() => setSelectedItem(item)} />
                   ))}
@@ -2297,7 +2530,7 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                     <div className="flex items-center gap-2">
                       <div className="w-5 h-5 rounded-full border-2 border-white shadow-sm" style={{ backgroundColor: selectedItem.dominantColor }} />
                       <span className="text-sm" style={{ fontFamily: "'DM Sans', sans-serif", color: "#2C1810" }}>配色</span>
-                      <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>{selectedItem.dominantColor.toUpperCase()}</span>
+                      <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>{colorFamilyName(selectedItem.dominantColor)} · {selectedItem.dominantColor.toUpperCase()}</span>
                     </div>
                     <span className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#8B3A52" }}>
                       以此下著顏色為配色，建議搭配上衣主色
@@ -2318,29 +2551,24 @@ function ColorSuggestionScreen({ onBack, analyses, initialColor, initialMode, wa
                 <p className="text-xs mb-3" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#C4A898" }}>
                   上衣作為主色，以下為衣櫥中符合的單品
                 </p>
-                {suggestedTops.length > 0 ? (
-                  <div className="grid grid-cols-3 gap-2">
-                    {suggestedTops.map(item => (
-                      <WardrobeThumb 
-                        key={item.id} 
-                        item={item} 
-                        selected={previewTop?.id === item.id}
-                        onClick={() => handleSelectPreview(item, 'top')} 
-                      />
-                    ))}
-                  </div>
-                ) : (
+                {suggestedTops.length === 0 ? (
                   <div className="rounded-2xl p-5 text-center" style={{ background: "#FDFAF6", border: "1.5px dashed rgba(44,24,16,0.15)" }}>
                     <ShoppingBag size={28} color="#C4A898" strokeWidth={1} />
                     <p className="text-sm mt-2" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>
-                      衣櫥中暫無符合此配色的上衣
+                      衣櫥中暫無符合推薦色的上衣，先用色彩示意挑選搭配
                     </p>
                   </div>
-                )}
+                ) : null}
+                {complementaryDirectItems.length > 0 && <div><p className="mb-2 text-xs text-[#8B3A52]">推薦色相符</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">{complementaryDirectItems.map(item => <WardrobeThumb key={item.id} item={item} selected={previewTop?.id === item.id} onClick={() => handleSelectPreview(item, "top")} />)}</div></div>}
+                {complementarySimilarItems.length > 0 && <div className="mt-3"><p className="mb-2 text-xs text-[#B87355]">相近色（RGB 距離小於 80）</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">{complementarySimilarItems.map(item => <WardrobeThumb key={item.id} item={item} selected={previewTop?.id === item.id} onClick={() => handleSelectPreview(item, "top")} />)}</div></div>}
+                {recommendedPalettes.length > 0 && <div className="mt-3"><p className="mb-2 text-xs text-[#8A6F5E]">示意上衣顏色</p><div className="flex flex-wrap gap-2">{recommendedPalettes.map(color => <button key={color} type="button" onClick={() => { setSimulatedColor(color); setPreviewTop(null); }} aria-label={`示意上衣顏色 ${color}`} className="h-9 w-9 rounded-full border-2 border-white shadow ring-1 ring-[#D8C5B9]" style={{ backgroundColor: color }} />)}</div><p className="mt-2 text-[11px] text-[#9B8274]">平面搭配示意不會送入 AI 試衣；AI 試衣需實際衣物。</p></div>}
               </div>
             </>
           )}
 
+          </div>
+          </div>
+        </div>
         </div>
       </div>
     </SubScreen>
@@ -2464,8 +2692,13 @@ export default function App() {
   const [user, setUser] = useState<UserAccount | null>(null);
   const [analyses, setAnalyses] = useState<ColorAnalysis[]>([]);
   const [wardrobe, setWardrobe] = useState<WardrobeItem[]>([]);
+  const [analysesLoadState, setAnalysesLoadState] = useState<RemoteDataState>("idle");
+  const [wardrobeLoadState, setWardrobeLoadState] = useState<RemoteDataState>("idle");
+  const analysesRequestVersion = useRef(0);
+  const wardrobeRequestVersion = useRef(0);
   const [selectedColor, setSelectedColor] = useState<string | undefined>(undefined);
   const [selectedMode, setSelectedMode] = useState<SuggestionMode | undefined>(undefined);
+  const [tryOnSelection, setTryOnSelection] = useState<{ topId: number | null; bottomId: number | null }>({ topId: null, bottomId: null });
 
   useEffect(() => {
     const token = localStorage.getItem('pca_jwt_token');
@@ -2481,69 +2714,130 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    const handleExpiredSession = () => expireSession();
+    window.addEventListener("pca:session-expired", handleExpiredSession);
+    return () => window.removeEventListener("pca:session-expired", handleExpiredSession);
+  }, []);
+
   // 🆕 當使用者登入成功，從後端取得「衣櫥」與「分析紀錄」資料
   useEffect(() => {
-    if (user) {
-      loadWardrobeData();
-      loadAnalysesData(); // 呼叫載入分析紀錄
-    } else {
-      setWardrobe([]); 
-      setAnalyses([]); // 若登出則一併清空分析紀錄
+    let cancelled = false;
+    if (!user) {
+      setWardrobe([]);
+      setAnalyses([]);
+      setWardrobeLoadState("idle");
+      setAnalysesLoadState("idle");
+      return () => {
+        cancelled = true;
+        wardrobeRequestVersion.current += 1;
+        analysesRequestVersion.current += 1;
+      };
     }
+
+    setWardrobe([]);
+    setAnalyses([]);
+    const refreshData = () => {
+      if (cancelled) return;
+      void loadWardrobeData(() => !cancelled);
+      void loadAnalysesData(() => !cancelled);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshData();
+    };
+
+    refreshData();
+    window.addEventListener("focus", refreshData);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      cancelled = true;
+      wardrobeRequestVersion.current += 1;
+      analysesRequestVersion.current += 1;
+      window.removeEventListener("focus", refreshData);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, [user]);
 
   // 從後端獲取分析紀錄清單
-  async function loadAnalysesData() {
+  async function loadAnalysesData(isCurrent: () => boolean = () => true) {
+    const requestVersion = ++analysesRequestVersion.current;
+    const isLatestRequest = () => isCurrent() && requestVersion === analysesRequestVersion.current;
+    setAnalysesLoadState("loading");
     try {
       const result = await api.getAnalyses();
-      if (result.success) {
-        const mappedAnalyses: ColorAnalysis[] = result.data.map((item: any) => ({
-          id: item.id,
-          date: item.date,
-          imageUrl: `http://127.0.0.1:5001${item.image_url}`,
-          season: item.season, // 接收後端的 "春(Spring)"
-          type: item.type,     // 接收後端的 "亮春型"
-          colors: item.colors, // 完全接收後端查出的色票陣列
-          description: item.description 
-        }));
-        setAnalyses(mappedAnalyses);
-      }
+      if (!isLatestRequest()) return;
+      const mappedAnalyses: ColorAnalysis[] = result.data.map((item: any) => ({
+        id: item.id,
+        date: item.date,
+        imageUrl: resolveAssetUrl(item.image_url),
+        season: item.season,
+        type: item.type,
+        colors: item.colors,
+        description: item.description
+      }));
+      setAnalyses(mappedAnalyses);
+      setAnalysesLoadState("loaded");
     } catch (e) {
+      if (!isLatestRequest()) return;
       console.error("無法載入分析紀錄", e);
+      if (isSessionExpiredError(e)) expireSession();
+      setAnalyses([]);
+      setAnalysesLoadState("error");
     }
   }
 
   // 從後端獲取衣櫥清單
-  async function loadWardrobeData() {
+  async function loadWardrobeData(isCurrent: () => boolean = () => true) {
+    const requestVersion = ++wardrobeRequestVersion.current;
+    const isLatestRequest = () => isCurrent() && requestVersion === wardrobeRequestVersion.current;
+    setWardrobeLoadState("loading");
     try {
       const result = await api.getWardrobe();
-      if (result.success) {
-        const mappedItems: WardrobeItem[] = result.data.map((item: any) => {
-          // 將後端傳來的 "42,42,44" 字串轉成 HEX
-          let hexColor = '#C4856A'; // 預設色
-          if (item.colors[0]) {
-            const [r, g, b] = item.colors[0].split(',').map(Number);
-            hexColor = rgbToHex(r, g, b);
-          }
-
-          return {
-            id: item.item_id,
-            date: new Date().toISOString().slice(0, 10),
-            imageUrl: `http://127.0.0.1:5001${item.image_url}`,
-            category: item.tag,
-            dominantColor: hexColor // 改為存入 HEX
-          };
-        });
-        setWardrobe(mappedItems);
-      }
+      if (!isLatestRequest()) return;
+      const mappedItems: WardrobeItem[] = result.data.map((item: any) => {
+        let hexColor = '#C4856A';
+        if (item.colors?.[0]) {
+          const [r, g, b] = item.colors[0].split(',').map(Number);
+          hexColor = rgbToHex(r, g, b);
+        }
+        return {
+          id: item.item_id,
+          date: item.date,
+          imageUrl: resolveAssetUrl(item.image_url),
+          tryOnImageUrl: resolveAssetUrl(item.tryon_image_url || item.image_url),
+          category: item.tag,
+          dominantColor: hexColor,
+        };
+      });
+      setWardrobe(mappedItems);
+      setWardrobeLoadState("loaded");
     } catch (e) {
+      if (!isLatestRequest()) return;
       console.error("無法載入衣櫥資料", e);
+      if (isSessionExpiredError(e)) expireSession();
+      setWardrobe([]);
+      setWardrobeLoadState("error");
     }
+  }
+
+  function expireSession() {
+    analysesRequestVersion.current += 1;
+    wardrobeRequestVersion.current += 1;
+    localStorage.removeItem('pca_jwt_token');
+    localStorage.removeItem('pca_user');
+    setHistory([]);
+    setUser(null);
+    setScreen("auth");
   }
 
   function navigate(to: Screen) {
     setHistory((h) => [...h, screen]);
     setScreen(to);
+  }
+
+  function startTryOnWithOutfit(topId: number, bottomId: number) {
+    setTryOnSelection({ topId, bottomId });
+    navigate("virtual-tryon");
   }
 
   function goBack() {
@@ -2573,6 +2867,8 @@ export default function App() {
   }
 
   function addAnalysis(a: ColorAnalysis) {
+    analysesRequestVersion.current += 1;
+    setAnalysesLoadState("loaded");
     setAnalyses((prev) => [a, ...prev]); 
   }
 
@@ -2582,6 +2878,8 @@ export default function App() {
       const response = await api.deleteAnalysis(id);
       
       if (response.success) {
+        analysesRequestVersion.current += 1;
+        setAnalysesLoadState("loaded");
         // 後端刪除成功後，才將該筆資料從 React 畫面上移除
         setAnalyses((prev) => prev.filter((a) => a.id !== id));
       } else {
@@ -2595,13 +2893,18 @@ export default function App() {
 
   // 前端狀態更新（圖片上傳完成後呼叫）
   function addWardrobeItem(item: WardrobeItem) {
+    wardrobeRequestVersion.current += 1;
+    setWardrobeLoadState("loaded");
     setWardrobe((prev) => [item, ...prev]); 
   }
 
   // 🆕 刪除衣物時同步刪除資料庫與本機圖片
   async function deleteWardrobeItem(id: number) {
     try {
-      await api.dropWardrobeItem(id);
+      const response = await api.dropWardrobeItem(id);
+      if (!response.success) throw new Error(response.message || "衣物刪除失敗");
+      wardrobeRequestVersion.current += 1;
+      setWardrobeLoadState("loaded");
       setWardrobe((prev) => prev.filter((item) => item.id !== id));
     } catch (e) {
       console.error("刪除衣物失敗", e);
@@ -2639,8 +2942,8 @@ export default function App() {
   }
 
   return (
-    <div className="size-full flex items-center justify-center bg-[#E8DDD3]">
-      <div className="relative overflow-hidden w-full h-full md:w-[420px] md:h-[92vh] md:max-h-[920px] md:rounded-[32px] md:shadow-[0_20px_60px_rgba(44,24,16,0.18),0_8px_24px_rgba(44,24,16,0.1)]"
+    <div className="flex min-h-dvh w-full items-center justify-center bg-[#E8DDD3] md:p-4 xl:p-8">
+      <div className="relative h-dvh w-full overflow-hidden md:h-[calc(100dvh-2rem)] md:max-w-[1440px] md:rounded-[32px] md:shadow-[0_20px_60px_rgba(44,24,16,0.18),0_8px_24px_rgba(44,24,16,0.1)]"
         style={{
           background: "#F7F2EC",
         }}>
@@ -2657,17 +2960,27 @@ export default function App() {
           )}
           {screen === "color-analysis" && (
             <motion.div key="color-analysis" className="absolute inset-0" {...slide}>
-              <ColorAnalysisScreen onBack={goBack} user={user} analyses={analyses} onAdd={addAnalysis} onDelete={deleteAnalysis} onColorClick={handleColorClick} onImageClick={handleAnalysisImageClick} />
+              <ColorAnalysisScreen onBack={goBack} user={user} analyses={analyses} loadState={analysesLoadState} onReload={() => loadAnalysesData()} onAdd={addAnalysis} onDelete={deleteAnalysis} onColorClick={handleColorClick} onImageClick={handleAnalysisImageClick} />
             </motion.div>
           )}
           {screen === "wardrobe" && (
             <motion.div key="wardrobe" className="absolute inset-0" {...slide}>
-              <WardrobeScreen onBack={goBack} wardrobe={wardrobe} onAdd={addWardrobeItem} onDelete={deleteWardrobeItem} onTopImageClick={handleTopImageClick} onBottomImageClick={handleBottomImageClick} />
+              <WardrobeScreen onBack={goBack} wardrobe={wardrobe} loadState={wardrobeLoadState} onReload={() => loadWardrobeData()} onAdd={addWardrobeItem} onDelete={deleteWardrobeItem} onTopImageClick={handleTopImageClick} onBottomImageClick={handleBottomImageClick} />
+            </motion.div>
+          )}
+          {screen === "virtual-tryon" && (
+            <motion.div key="virtual-tryon" className="absolute inset-0" {...slide}>
+              <VirtualTryOnScreen onBack={goBack} wardrobe={wardrobe} initialTopId={tryOnSelection.topId} initialBottomId={tryOnSelection.bottomId} />
+            </motion.div>
+          )}
+          {screen === "outfits" && (
+            <motion.div key="outfits" className="absolute inset-0" {...slide}>
+              <OutfitCollectionScreen onBack={goBack} onTryOn={startTryOnWithOutfit} />
             </motion.div>
           )}
           {screen === "color-suggestion" && (
             <motion.div key="color-suggestion" className="absolute inset-0" {...slide}>
-              <ColorSuggestionScreen onBack={goBack} analyses={analyses} initialColor={selectedColor} initialMode={selectedMode} wardrobe={wardrobe} />
+              <ColorSuggestionScreen onBack={goBack} onStartTryOn={startTryOnWithOutfit} analyses={analyses} initialColor={selectedColor} initialMode={selectedMode} wardrobe={wardrobe} />
             </motion.div>
           )}
         </AnimatePresence>
