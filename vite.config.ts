@@ -37,6 +37,7 @@ export default defineConfig({
   // ----- server 代理設定 -----
   server: {
     host: '0.0.0.0',
+    allowedHosts: ['traffic-ghz-mixer-point.trycloudflare.com'],
     proxy: {
       '/api': {
         target: process.env.PCA_BACKEND_ORIGIN || 'http://127.0.0.1:5001',

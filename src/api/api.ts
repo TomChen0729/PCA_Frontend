@@ -9,7 +9,7 @@ export function resolveAssetUrl(path: string): string {
 }
 
 class ApiError extends Error {
-  constructor(message: string, public readonly status: number, public readonly code?: string) {
+  constructor(message: string, public readonly status: number, public readonly code?: string, public readonly payload?: Record<string, any>) {
     super(message);
     this.name = 'ApiError';
     if (['token_expired', 'invalid_token', 'missing_token'].includes(code || '') && typeof window !== 'undefined') {
@@ -25,7 +25,7 @@ export function isSessionExpiredError(error: unknown): boolean {
 async function readResponse(res: Response) {
   const payload = await res.json().catch(() => ({}));
   if (!res.ok || payload.success === false) {
-    throw new ApiError(payload.message || `API 請求失敗 (${res.status})`, res.status, payload.code);
+    throw new ApiError(payload.message || `API 請求失敗 (${res.status})`, res.status, payload.code, payload);
   }
   return payload;
 }
@@ -77,10 +77,11 @@ export const api = {
     return readResponse(res);
   },
 
-  previewWardrobeItem: async (file: File, tag: string) => {
+  previewWardrobeItem: async (file: File, tag: string, rotationDegrees = 0) => {
     const formData = new FormData();
     formData.append('image', file);
     formData.append('tag', tag);
+    formData.append('rotation_degrees', String(rotationDegrees));
     const res = await fetch(`${BASE_URL}/wardrobe/preview-item`, {
       method: 'POST', headers: getAuthHeaders(), body: formData,
     });
@@ -200,6 +201,17 @@ export const api = {
     });
     return readResponse(res);
   },
+
+  getRecyclingSites: async (options: { latitude?: number; longitude?: number; district?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (options.latitude !== undefined) params.set('latitude', String(options.latitude));
+    if (options.longitude !== undefined) params.set('longitude', String(options.longitude));
+    if (options.district) params.set('district', options.district);
+    return readResponse(await fetch(`${BASE_URL}/recycling/sites?${params}`, { headers: getAuthHeaders() }));
+  },
+  getRecyclingItems: async () => readResponse(await fetch(`${BASE_URL}/recycling/items`, { headers: getAuthHeaders() })),
+  planRecycling: async (itemId: number, siteId: string) => readResponse(await fetch(`${BASE_URL}/recycling/plan`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ item_id: itemId, site_id: siteId }) })),
+  updateRecyclingItem: async (action: 'cancel' | 'complete', itemId: number) => readResponse(await fetch(`${BASE_URL}/recycling/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ item_id: itemId }) })),
 
   getTryOnResult: async (resultId: string) => {
     const res = await fetch(`${BASE_URL}/vton/results/${encodeURIComponent(resultId)}`, {

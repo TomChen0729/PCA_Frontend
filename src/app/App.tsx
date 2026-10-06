@@ -1,13 +1,14 @@
 import { api, isSessionExpiredError, resolveAssetUrl } from "../api/api";
 import VirtualTryOnScreen from "./components/VirtualTryOnScreen";
 import OutfitCollectionScreen from "./components/OutfitCollectionScreen";
+import RecyclingScreen from "./components/RecyclingScreen";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react"; // 動畫庫
 import {
   // Lucide React 圖標庫
   ArrowLeft, Sparkles, ShoppingBag, Palette,
   User, X, Eye, EyeOff, Plus, ChevronRight,
-  Camera, Trash2, CheckCircle
+  Camera, Trash2, CheckCircle, RotateCcw, RotateCw, Recycle
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ import {
  * Screen - 畫面類型
  * 定義應用中所有可能的畫面狀態
  */
-type Screen = "auth" | "home" | "color-analysis" | "wardrobe" | "color-suggestion" | "virtual-tryon" | "outfits";
+type Screen = "auth" | "home" | "color-analysis" | "wardrobe" | "recycling" | "color-suggestion" | "virtual-tryon" | "outfits";
 type RemoteDataState = "idle" | "loading" | "loaded" | "error";
 
 /**
@@ -54,6 +55,7 @@ interface WardrobeItem {
   tryOnImageUrl?: string;     // AI 試穿使用的原始圖片
   category: "top" | "bottom"; // 類別：上衣或下著
   dominantColor: string;      // 第一個主要顏色
+  recyclingStatus?: "active" | "planned" | "recycled";
 }
 
 // ─── Color palette generation ────────────────────────────────────────────────
@@ -777,6 +779,9 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
   const [maskReady, setMaskReady] = useState(false);
   const [maskCoverage, setMaskCoverage] = useState<number | null>(null);
   const [segmentationError, setSegmentationError] = useState("");
+  const [orientationMessage, setOrientationMessage] = useState("");
+  const [rotationDegrees, setRotationDegrees] = useState(0);
+  const [appliedRotation, setAppliedRotation] = useState(0);
   const [isSegmenting, setIsSegmenting] = useState(false);
   const [maskTool, setMaskTool] = useState<"erase" | "restore">("erase");
   const [brushSize, setBrushSize] = useState(28);
@@ -791,7 +796,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
 
   function closeModal() {
     if (isUploading || isSegmenting) return;
-    if (preview) URL.revokeObjectURL(preview);
+    if (preview?.startsWith("blob:")) URL.revokeObjectURL(preview);
     setPreview(null);
     setSelectedFile(null);
     setMaskData(null);
@@ -815,40 +820,75 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
         setStep("category");
         setCategory("top");
       }
-      if (preview) URL.revokeObjectURL(preview);
+      if (preview?.startsWith("blob:")) URL.revokeObjectURL(preview);
       setPreview(null);
       setSelectedFile(null);
       setMaskData(null);
       setMaskReady(false);
       setMaskCoverage(null);
       setSegmentationError("");
+      setOrientationMessage("");
+      setRotationDegrees(0);
+      setAppliedRotation(0);
       setIsUploading(false);
     }
   }, [open, initialCategory]);
 
-  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    // Allow selecting the same file again after resetting or changing category.
-    e.target.value = "";
-    if (!file) return;
-    if (preview) URL.revokeObjectURL(preview);
-    const url = URL.createObjectURL(file);
-    setSelectedFile(file);
-    setPreview(url);
+  function updateOrientationMessage(found: boolean | undefined) {
+    if (found === true) setOrientationMessage("已讀取照片中的 EXIF 方向資訊並自動校正；仍可手動微調。");
+    else if (found === false) setOrientationMessage("照片未包含 EXIF 方向資訊，無法自動推斷拍攝角度；已保留原方向，請手動確認或旋轉。");
+  }
+
+  function setNormalizedPreview(nextPreview: string) {
+    if (preview?.startsWith("blob:")) URL.revokeObjectURL(preview);
+    setPreview(nextPreview);
+  }
+
+  async function runSegmentation(file: File, angle: number) {
+    setIsSegmenting(true);
+    setSegmentationError("");
     setMaskData(null);
     setMaskReady(false);
     setMaskCoverage(null);
-    setSegmentationError("");
-    setIsSegmenting(true);
+    maskCanvasRef.current = null;
+    initialMaskRef.current = null;
     try {
-      const result = await api.previewWardrobeItem(file, category);
+      const result = await api.previewWardrobeItem(file, category, angle);
+      if (result.normalized_image_data) setNormalizedPreview(result.normalized_image_data);
+      updateOrientationMessage(result.exif_orientation_found);
+      setAppliedRotation(angle);
       setMaskData(result.mask_data);
       setMaskCoverage(result.coverage);
     } catch (cause) {
+      const payload = cause instanceof Error && "payload" in cause
+        ? (cause as Error & { payload?: { normalized_image_data?: string; exif_orientation_found?: boolean } }).payload
+        : undefined;
+      if (payload?.normalized_image_data) setNormalizedPreview(payload.normalized_image_data);
+      if (payload && typeof payload.exif_orientation_found === "boolean") updateOrientationMessage(payload.exif_orientation_found);
+      else setOrientationMessage("無法取得可用的 EXIF 方向資訊；仍可手動調整角度。");
+      setAppliedRotation(angle);
       setSegmentationError(cause instanceof Error ? cause.message : "衣物辨識失敗，請換一張照片再試");
     } finally {
       setIsSegmenting(false);
     }
+  }
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (preview?.startsWith("blob:")) URL.revokeObjectURL(preview);
+    setSelectedFile(file);
+    setPreview(URL.createObjectURL(file));
+    setRotationDegrees(0);
+    setAppliedRotation(0);
+    setOrientationMessage("正在讀取圖片方向資訊並辨識衣物…");
+    await runSegmentation(file, 0);
+  }
+
+  async function applyRotation() {
+    if (!selectedFile || isUploading || isSegmenting) return;
+    await runSegmentation(selectedFile, rotationDegrees);
   }
 
   useEffect(() => {
@@ -1079,6 +1119,21 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                   {!preview && <button type="button" onClick={() => fileRef.current?.click()} className="rounded-xl bg-[#EDE4D8] px-4 py-3 text-sm text-[#5A3A2E]">選擇{category === "top" ? "上衣" : "下著"}照片</button>}
 
                   {preview && <div className="flex flex-col gap-3">
+                    <div className="rounded-xl bg-[#F7F2EC] p-3">
+                      <p className="text-xs font-medium text-[#5A3A2E]">圖片方向校正</p>
+                      <p className="mt-1 text-xs leading-relaxed text-[#8A6F5E]">{orientationMessage || "系統會先依 EXIF 方向資訊校正；若沒有方向資訊，請手動調整。"}</p>
+                      <label className="mt-3 flex items-center justify-between gap-3 text-xs text-[#5A3A2E]">
+                        <span>手動旋轉（順時針）</span><span className="min-w-12 text-right font-medium">{rotationDegrees}°</span>
+                      </label>
+                      <input type="range" min="0" max="359" step="1" value={rotationDegrees} onChange={(event) => setRotationDegrees(Number(event.target.value))} disabled={isUploading || isSegmenting} aria-label="手動旋轉衣物照片角度" className="mt-2 w-full accent-[#8B3A52]" />
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button type="button" onClick={() => setRotationDegrees((value) => (value + 345) % 360)} disabled={isUploading || isSegmenting} className="min-h-10 rounded-lg bg-white px-3 text-xs text-[#5A3A2E] disabled:opacity-50"><RotateCcw size={14} className="mr-1 inline" />逆時針 15°</button>
+                        <button type="button" onClick={() => setRotationDegrees((value) => (value + 15) % 360)} disabled={isUploading || isSegmenting} className="min-h-10 rounded-lg bg-white px-3 text-xs text-[#5A3A2E] disabled:opacity-50"><RotateCw size={14} className="mr-1 inline" />順時針 15°</button>
+                        <button type="button" onClick={() => setRotationDegrees(0)} disabled={isUploading || isSegmenting} className="min-h-10 rounded-lg bg-white px-3 text-xs text-[#5A3A2E] disabled:opacity-50">設為 0°</button>
+                      </div>
+                      <button type="button" onClick={applyRotation} disabled={isUploading || isSegmenting || !selectedFile || rotationDegrees === appliedRotation} className="mt-3 min-h-11 w-full rounded-lg bg-[#8B3A52] px-3 py-2 text-xs font-medium text-white disabled:opacity-45">{isSegmenting ? "正在套用角度並重新辨識…" : "套用角度並重新辨識"}</button>
+                      {rotationDegrees !== appliedRotation && <p className="mt-2 text-xs text-[#8A6F5E]">調整角度後按上方按鈕，系統會以新方向重新產生遮罩。</p>}
+                    </div>
                     <p className="text-xs leading-relaxed text-[#8A6F5E]">自動保留辨識到的{category === "top" ? "上衣" : "下著"}，手腳會透明化。建議拍衣服平放或掛拍；若照片中手腳遮住衣服，遮住的布料細節無法自動還原。</p>
                     {maskData && <>
                       <div className="flex flex-wrap items-center gap-2">
@@ -1096,7 +1151,7 @@ function AddWardrobeModal({ open, onClose, onComplete, initialCategory }: {
                     <button
                       onClick={() => {
                         if (isUploading || isSegmenting) return;
-                        if (preview) { URL.revokeObjectURL(preview); setPreview(null); setSelectedFile(null); setMaskData(null); setMaskReady(false); setMaskCoverage(null); setSegmentationError(""); maskCanvasRef.current = null; initialMaskRef.current = null; originalImageRef.current = null; if (fileRef.current) fileRef.current.value = ""; }
+                        if (preview) { if (preview.startsWith("blob:")) URL.revokeObjectURL(preview); setPreview(null); setSelectedFile(null); setMaskData(null); setMaskReady(false); setMaskCoverage(null); setSegmentationError(""); setOrientationMessage(""); setRotationDegrees(0); setAppliedRotation(0); maskCanvasRef.current = null; initialMaskRef.current = null; originalImageRef.current = null; if (fileRef.current) fileRef.current.value = ""; }
                         else if (initialCategory) closeModal();
                         else setStep("category");
                       }}
@@ -1467,6 +1522,7 @@ function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
   isNew?: boolean;
 }) {
   const [deleting, setDeleting] = useState(false);
+  const isInactive = item.recyclingStatus === "planned" || item.recyclingStatus === "recycled";
 
   function handleDelete() {
     setDeleting(true);
@@ -1483,7 +1539,8 @@ function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
     >
       {/* Photo */}
       <button
-        onClick={onImageClick}
+        onClick={isInactive ? undefined : onImageClick}
+        disabled={isInactive}
         className="shrink-0 active:opacity-70 transition-opacity"
         style={{ width: 72, minHeight: 96, background: "#EDE4D8" }}
       >
@@ -1504,6 +1561,7 @@ function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
                 <span className="text-sm leading-tight" style={{ fontFamily: "'Playfair Display', serif", fontWeight: 500, color: "#2C1810" }}>
                   {item.category === "top" ? "上衣" : "下著"}
                 </span>
+                {isInactive && <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: item.recyclingStatus === "recycled" ? "#52745A" : "#8B5E30", background: item.recyclingStatus === "recycled" ? "#E5F0E6" : "#F8EEDC" }}>{item.recyclingStatus === "recycled" ? "已回收" : "待回收・已停用"}</span>}
                 {/* Dominant color swatch */}
                 <div className="flex items-center gap-1 px-2 py-0.5 rounded-full" style={{ background: "rgba(44,24,16,0.05)" }}>
                   <div className="w-3 h-3 rounded-full border border-white/60 shadow-sm" style={{ backgroundColor: item.dominantColor }} />
@@ -1520,10 +1578,13 @@ function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
 
       {/* Delete button */}
       <div className="flex items-center pr-3 pl-1 shrink-0">
+        {isInactive ? <span className="px-2 text-xs" style={{ color: "#8A6F5E" }}>已停用</span> : null}
         <button
           onClick={handleDelete}
+          disabled={isInactive}
+          title={isInactive ? "回收流程中的單品不能直接刪除" : "刪除單品"}
+          style={isInactive ? { opacity: 0.35, cursor: "not-allowed" } : { background: "rgba(212,24,61,0.07)" }}
           className="w-8 h-8 rounded-full flex items-center justify-center transition-colors active:scale-90"
-          style={{ background: "rgba(212,24,61,0.07)" }}
         >
           <Trash2 size={15} color="#d4183d" strokeWidth={1.8} />
         </button>
@@ -1692,7 +1753,7 @@ function ColorAnalysisScreen({ onBack, user, analyses, loadState, onReload, onAd
  * 【空狀態】
  * 根據當前篩選條件顯示對應的空狀態訊息
  */
-function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete, onTopImageClick, onBottomImageClick }: {
+function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete, onTopImageClick, onBottomImageClick, onOpenRecycling }: {
   onBack: () => void;
   wardrobe: WardrobeItem[];
   loadState: RemoteDataState;
@@ -1701,6 +1762,7 @@ function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete
   onDelete: (id: number) => void;
   onTopImageClick: () => void;
   onBottomImageClick: () => void;
+  onOpenRecycling: () => void;
 }) {
   const [filter, setFilter] = useState<"all" | "top" | "bottom">("all");
   const [addOpen, setAddOpen] = useState(false);
@@ -1723,7 +1785,7 @@ function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete
 
   return (
     <>
-      <SubScreen title="我的衣櫥" subtitle="My Wardrobe" accentColor="#8B3A52" onBack={onBack}>
+      <SubScreen title="我的衣櫥" subtitle="My Wardrobe" accentColor="#8B3A52" onBack={onBack} headerRight={<button type="button" onClick={onOpenRecycling} className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm" style={{ color: "#8B3A52", background: "rgba(139,58,82,.09)" }}><Recycle size={16}/> 衣物回收</button>}>
         <div className="flex min-h-full flex-col">
           {/* Filter buttons */}
           <div className="mobile-safe-x flex shrink-0 gap-2 py-4 md:px-8" style={{ borderBottom: "1px solid rgba(44,24,16,0.06)" }}>
@@ -2807,6 +2869,7 @@ export default function App() {
           tryOnImageUrl: resolveAssetUrl(item.tryon_image_url || item.image_url),
           category: item.tag,
           dominantColor: hexColor,
+          recyclingStatus: item.recycling_status || "active",
         };
       });
       setWardrobe(mappedItems);
@@ -2965,12 +3028,17 @@ export default function App() {
           )}
           {screen === "wardrobe" && (
             <motion.div key="wardrobe" className="absolute inset-0" {...slide}>
-              <WardrobeScreen onBack={goBack} wardrobe={wardrobe} loadState={wardrobeLoadState} onReload={() => loadWardrobeData()} onAdd={addWardrobeItem} onDelete={deleteWardrobeItem} onTopImageClick={handleTopImageClick} onBottomImageClick={handleBottomImageClick} />
+              <WardrobeScreen onBack={goBack} wardrobe={wardrobe} loadState={wardrobeLoadState} onReload={() => loadWardrobeData()} onAdd={addWardrobeItem} onDelete={deleteWardrobeItem} onTopImageClick={handleTopImageClick} onBottomImageClick={handleBottomImageClick} onOpenRecycling={() => navigate("recycling")} />
+            </motion.div>
+          )}
+          {screen === "recycling" && (
+            <motion.div key="recycling" className="absolute inset-0" {...slide}>
+              <RecyclingScreen wardrobe={wardrobe} onBack={goBack} onChanged={() => loadWardrobeData()} />
             </motion.div>
           )}
           {screen === "virtual-tryon" && (
             <motion.div key="virtual-tryon" className="absolute inset-0" {...slide}>
-              <VirtualTryOnScreen onBack={goBack} wardrobe={wardrobe} initialTopId={tryOnSelection.topId} initialBottomId={tryOnSelection.bottomId} />
+              <VirtualTryOnScreen onBack={goBack} wardrobe={wardrobe.filter(item => !item.recyclingStatus || item.recyclingStatus === "active")} initialTopId={tryOnSelection.topId} initialBottomId={tryOnSelection.bottomId} />
             </motion.div>
           )}
           {screen === "outfits" && (
@@ -2980,7 +3048,7 @@ export default function App() {
           )}
           {screen === "color-suggestion" && (
             <motion.div key="color-suggestion" className="absolute inset-0" {...slide}>
-              <ColorSuggestionScreen onBack={goBack} onStartTryOn={startTryOnWithOutfit} analyses={analyses} initialColor={selectedColor} initialMode={selectedMode} wardrobe={wardrobe} />
+              <ColorSuggestionScreen onBack={goBack} onStartTryOn={startTryOnWithOutfit} analyses={analyses} initialColor={selectedColor} initialMode={selectedMode} wardrobe={wardrobe.filter(item => !item.recyclingStatus || item.recyclingStatus === "active")} />
             </motion.div>
           )}
         </AnimatePresence>
