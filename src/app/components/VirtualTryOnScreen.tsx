@@ -245,7 +245,7 @@ export default function VirtualTryOnScreen({ wardrobe, onBack, initialTopId = nu
             <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[#EDE4D8] px-4 py-3 sm:px-6">
               <div>
                 <h2 id="tryon-result-title" className="text-base font-semibold text-[#2C1810] sm:text-lg">{progressText === "整套試穿完成" ? "整套試穿結果" : "目前生成結果"}</h2>
-                <p className="mt-0.5 text-xs text-[#8A6F5E]">可放大查看，確認整套穿搭效果</p>
+                <p className="mt-0.5 text-xs text-[#8A6F5E]">AI 生成的視覺預覽；結果圖片會自動保存在「試穿紀錄」</p>
               </div>
               <button type="button" aria-label="關閉試穿結果" onClick={() => setIsResultOpen(false)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[#5A3A2E] hover:bg-[#F4E9E2]"><X size={21} /></button>
             </header>
@@ -254,7 +254,7 @@ export default function VirtualTryOnScreen({ wardrobe, onBack, initialTopId = nu
             </div>
             <footer className="flex shrink-0 flex-col gap-2 border-t border-[#EDE4D8] p-3 sm:flex-row sm:justify-end sm:px-6">
               {savedMessage && <p role="status" className="self-center text-center text-xs text-[#8A6F5E] sm:mr-auto">{savedMessage}</p>}
-              <button type="button" onClick={saveFavorite} disabled={isFavorite} className="min-h-11 rounded-xl bg-[#F4E9E2] px-5 py-2.5 text-sm font-medium text-[#8B3A52] disabled:opacity-60">{isFavorite ? "已收藏這套穿搭" : "收藏這套穿搭"}</button>
+              <button type="button" onClick={saveFavorite} disabled={isFavorite} className="min-h-11 rounded-xl bg-[#F4E9E2] px-5 py-2.5 text-sm font-medium text-[#8B3A52] disabled:opacity-60">{isFavorite ? "已收藏這組衣物" : "收藏這組衣物"}</button>
               <button type="button" onClick={() => setIsResultOpen(false)} className="min-h-11 rounded-xl bg-[#8B3A52] px-5 py-2.5 text-sm font-medium text-white">返回試衣頁</button>
             </footer>
           </section>

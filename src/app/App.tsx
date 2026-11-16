@@ -8,7 +8,7 @@ import {
   // Lucide React 圖標庫
   ArrowLeft, Sparkles, ShoppingBag, Palette,
   User, X, Eye, EyeOff, Plus, ChevronRight,
-  Camera, Trash2, CheckCircle, RotateCcw, RotateCw, Recycle
+  Camera, Trash2, CheckCircle, RotateCcw, RotateCw, Recycle, AlertTriangle
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -34,6 +34,14 @@ interface UserAccount {
  * ColorAnalysis - 色彩分析記錄
  * 儲存每次個人色彩分析的結果
  */
+interface ColorAnalysisQuality {
+  overall_quality_ok: boolean;
+  overall_quality_score: number | null;
+  recommend_reupload: boolean;
+  warnings: string[];
+  low_quality_rois: string[];
+}
+
 interface ColorAnalysis {
   id: number;           // 唯一識別碼
   date: string;         // 分析日期 (YYYY-MM-DD)
@@ -42,6 +50,7 @@ interface ColorAnalysis {
   type: string;         // 具體類型 (例如：深秋型)
   colors: string[];     // 適合的色彩列表 (HEX 格式)
   description: string;  // 分析結果描述
+  quality?: ColorAnalysisQuality; // 照片品質評估結果 (新分析才有，歷史記錄為 undefined)
 }
 
 /**
@@ -462,7 +471,7 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
  *
  * 【功能】
  * 1. 選擇照片 (pick)
- * 2. 模擬 AI 分析過程 (analyzing)
+ * 2. 等待後端完成分析 (analyzing)
  * 3. 顯示分析完成 (done)
  *
  * 【流程】
@@ -474,11 +483,10 @@ function AuthScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
  * @param onComplete - 分析完成時的回調，傳遞 ColorAnalysis 物件
  *
  * 【特色】
- * - 使用不規則進度條模擬真實的 AI 分析過程
- * - 顯示分析步驟：膚色偵測 → 色調分類 → 配色生成
- * - 隨機選擇預設的色彩分析結果
+ * - 顯示不代表實際百分比的等待動畫
+ * - 分析結果由後端回傳並保存
  */
-type AddStep = "pick" | "analyzing" | "done";
+type AddStep = "pick" | "analyzing" | "done" | "quality_alert";
 
 function AddAnalysisModal({ open, onClose, onComplete }: {
   open: boolean;
@@ -487,14 +495,12 @@ function AddAnalysisModal({ open, onClose, onComplete }: {
 }) {
   const [step, setStep] = useState<AddStep>("pick");
   const [preview, setPreview] = useState<string | null>(null);
-  const [progress, setProgress] = useState(0);
+  const [pendingAnalysis, setPendingAnalysis] = useState<ColorAnalysis | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Reset on open
   useEffect(() => {
-    if (open) { setStep("pick"); setPreview(null); setProgress(0); }
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    if (open) { setStep("pick"); setPreview(null); setPendingAnalysis(null); }
   }, [open]);
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -510,52 +516,43 @@ const startAnalysis = useCallback(async () => {
   const file = fileRef.current.files[0];
 
   setStep("analyzing");
-  setProgress(0);
-
-  // 視覺進度條：讓進度跑到 90% 營造努力分析中的感覺，並等待後端 API 回應
-  let p = 0;
-  intervalRef.current = setInterval(() => {
-    p = Math.min(p + (Math.random() * 10 + 2), 90);
-    setProgress(Math.round(p));
-  }, 200);
 
   try {
     // 呼叫後端 API
     const response = await api.analyzePersonalColor(file);
 
-    clearInterval(intervalRef.current!);
-    setProgress(100); // 取得結果後，直接拉滿到 100%
-
     if (response.success) {
-      setStep("done");
       const backendData = response.data;
-      
-      setTimeout(() => {
-        // 將後端的資料結構 Mapping 到前端定義的 ColorAnalysis 介面
-        const newAnalysis: ColorAnalysis = {
-          id: backendData.analysis_id, // 從資料庫取得的 ID
-          date: backendData.date,
-          imageUrl: resolveAssetUrl(backendData.image_url),
-          season: backendData.season,
-          type: backendData.type,
-          colors: backendData.colors,
-          description: backendData.description,
-        };
-        onComplete(newAnalysis);
-        onClose();
-      }, 900);
+      const newAnalysis: ColorAnalysis = {
+        id: backendData.analysis_id, // 從資料庫取得的 ID
+        date: backendData.date,
+        imageUrl: resolveAssetUrl(backendData.image_url),
+        season: backendData.season,
+        type: backendData.type,
+        colors: backendData.colors,
+        description: backendData.description,
+        quality: backendData.quality ?? undefined, // 照片品質資料 (後端回傳)
+      };
+
+      if (backendData.quality?.recommend_reupload || (backendData.quality?.warnings && backendData.quality.warnings.length > 0)) {
+        setPendingAnalysis(newAnalysis);
+        setStep("quality_alert");
+      } else {
+        setStep("done");
+        setTimeout(() => {
+          onComplete(newAnalysis);
+          onClose();
+        }, 900);
+      }
     } else {
       alert("分析失敗：" + (response.message || "未知錯誤"));
       onClose();
     }
   } catch (error) {
-    clearInterval(intervalRef.current!);
     alert("伺服器連線失敗");
     onClose();
   }
-}, [preview, onComplete, onClose]);
-
-  const progressColor = "linear-gradient(90deg, #C4856A 0%, #8B3A52 100%)";
+}, [onComplete, onClose]);
 
   return (
     <AnimatePresence>
@@ -584,15 +581,22 @@ const startAnalysis = useCallback(async () => {
                     {step === "pick" && "新增色彩分析"}
                     {step === "analyzing" && "分析中…"}
                     {step === "done" && "分析完成"}
+                    {step === "quality_alert" && "照片品質檢核提醒"}
                   </h2>
                   <p className="text-xs tracking-widest uppercase mt-0.5" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#B87355" }}>
                     {step === "pick" && "New Color Analysis"}
                     {step === "analyzing" && "Analyzing your photo"}
                     {step === "done" && "Analysis Complete"}
+                    {step === "quality_alert" && "Quality Notice"}
                   </p>
                 </div>
-                {step === "pick" && (
-                  <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "rgba(44,24,16,0.07)" }}>
+                {(step === "pick" || step === "quality_alert") && (
+                  <button onClick={() => {
+                    if (step === "quality_alert" && pendingAnalysis) {
+                      onComplete(pendingAnalysis);
+                    }
+                    onClose();
+                  }} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "rgba(44,24,16,0.07)" }}>
                     <X size={15} color="#8A6F5E" strokeWidth={2} />
                   </button>
                 )}
@@ -661,6 +665,64 @@ const startAnalysis = useCallback(async () => {
                 </div>
               )}
 
+              {/* ── Step: Quality Alert (品質檢核警示與引導) ── */}
+              {step === "quality_alert" && pendingAnalysis && (
+                <div className="flex flex-col items-center gap-4 py-1">
+                  <div className="w-14 h-14 rounded-full flex items-center justify-center shadow-sm" style={{ background: "rgba(234, 179, 8, 0.15)" }}>
+                    <AlertTriangle size={28} color="#B45309" strokeWidth={1.8} />
+                  </div>
+
+                  <div className="text-center px-1">
+                    <p className="text-base font-medium text-[#2C1810]" style={{ fontFamily: "'Playfair Display', serif" }}>
+                      拍攝品質可信度提醒
+                    </p>
+                    <p className="mt-1 text-xs text-[#8A6F5E] leading-relaxed">
+                      系統偵測到照片特徵受局部遮擋或光線干擾，可能影響色彩診斷準確度：
+                    </p>
+                  </div>
+
+                  {/* 警告清單方塊 */}
+                  <div className="w-full rounded-2xl p-3.5 space-y-2 border" style={{ background: "rgba(254, 243, 199, 0.45)", borderColor: "rgba(245, 158, 11, 0.3)" }}>
+                    {pendingAnalysis.quality?.warnings.map((w, i) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <span className="text-xs text-[#B45309] font-bold">⚠</span>
+                        <span className="text-xs text-[#92400E] leading-relaxed">{w}</span>
+                      </div>
+                    ))}
+                    <div className="pt-2 border-t border-[#FCD34D]/50 text-[11px] text-[#78350F] leading-relaxed">
+                      💡 建議使用光線充足、五官與前額無遮擋之正面清晰自拍，以獲得最佳診斷效果。
+                    </div>
+                  </div>
+
+                  {/* 操作按鈕 */}
+                  <div className="flex flex-col w-full gap-2.5 pt-2">
+                    <button
+                      onClick={() => {
+                        setStep("pick");
+                        setPreview(null);
+                        setPendingAnalysis(null);
+                        if (fileRef.current) fileRef.current.value = "";
+                      }}
+                      className="w-full rounded-xl py-3 flex items-center justify-center gap-2 active:opacity-75 transition-opacity"
+                      style={{ background: "linear-gradient(135deg, #C4856A 0%, #8B3A52 100%)" }}
+                    >
+                      <Camera size={15} color="#FDFAF6" />
+                      <span className="text-sm font-medium text-[#FDFAF6]">重新選擇照片</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        onComplete(pendingAnalysis);
+                        onClose();
+                      }}
+                      className="w-full rounded-xl py-2.5 active:opacity-75 transition-opacity"
+                      style={{ background: "rgba(44,24,16,0.06)" }}
+                    >
+                      <span className="text-xs text-[#8A6F5E]">保留本次診斷結果並檢視</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* ── Step: Analyzing ── */}
               {(step === "analyzing" || step === "done") && (
                 <div className="flex flex-col items-center gap-6 py-4">
@@ -672,49 +734,14 @@ const startAnalysis = useCallback(async () => {
                   )}
 
                   {step === "analyzing" ? (
-                    <div className="w-full flex flex-col gap-3">
-                      {/* Progress bar */}
-                      <div className="w-full rounded-full overflow-hidden" style={{ height: 6, background: "#EDE4D8" }}>
-                        <motion.div
-                          className="h-full rounded-full"
-                          style={{ background: progressColor }}
-                          initial={{ width: 0 }}
-                          animate={{ width: `${progress}%` }}
-                          transition={{ duration: 0.2, ease: "easeOut" }}
-                        />
+                    <div className="flex w-full flex-col items-center gap-4 py-3">
+                      <div className="relative h-12 w-12">
+                        <motion.div className="absolute inset-0 rounded-full border-[3px] border-[#EDE4D8] border-t-[#8B3A52]" animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} />
+                        <Sparkles size={18} color="#B87355" className="absolute inset-0 m-auto" />
                       </div>
-                      <div className="flex justify-between">
-                        <p className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#8A6F5E" }}>
-                          正在偵測膚色與色調…
-                        </p>
-                        <p className="text-xs" style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355" }}>
-                          {progress}%
-                        </p>
-                      </div>
-
-                      {/* Animated steps */}
-                      <div className="flex flex-col gap-2 mt-2">
-                        {[
-                          { label: "膚色偵測", threshold: 30 },
-                          { label: "色調分類", threshold: 60 },
-                          { label: "配色生成", threshold: 90 },
-                        ].map(({ label, threshold }) => (
-                          <div key={label} className="flex items-center gap-2">
-                            <div
-                              className="w-4 h-4 rounded-full flex items-center justify-center transition-colors duration-300"
-                              style={{ background: progress >= threshold ? "linear-gradient(135deg, #C4856A, #8B3A52)" : "#EDE4D8" }}
-                            >
-                              {progress >= threshold && <CheckCircle size={10} color="#FDFAF6" strokeWidth={2.5} />}
-                            </div>
-                            <span className="text-xs" style={{
-                              fontFamily: "'DM Sans', sans-serif",
-                              color: progress >= threshold ? "#2C1810" : "#C4A898",
-                              fontWeight: progress >= threshold ? 400 : 300,
-                            }}>
-                              {label}
-                            </span>
-                          </div>
-                        ))}
+                      <div className="text-center">
+                        <p className="text-sm font-medium text-[#2C1810]">正在分析照片</p>
+                        <p className="mt-1 text-xs leading-relaxed text-[#8A6F5E]">完成後會自動顯示分析結果，請稍候。</p>
                       </div>
                     </div>
                   ) : (
@@ -1471,6 +1498,28 @@ function AnalysisRow({ item, onDelete, onColorClick, onImageClick, isNew }: {
         <p className="text-xs leading-relaxed mt-2 pr-3 line-clamp-2" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#8A6F5E" }}>
           {item.description}
         </p>
+
+        {/* 照片品質警告 */}
+        {item.quality && (
+          <div className="mt-2 pr-3 space-y-1">
+            {item.quality.warnings.map((w, i) => (
+              <div key={i} className="flex items-start gap-1">
+                <span style={{ fontSize: 11, lineHeight: 1.6, color: "#B45309", flexShrink: 0 }}>⚠</span>
+                <span style={{ fontSize: 11, lineHeight: 1.6, fontFamily: "'DM Sans', sans-serif", color: "#B45309" }}>{w}</span>
+              </div>
+            ))}
+            {item.quality.recommend_reupload && (
+              <div
+                className="mt-1 rounded-lg px-2 py-1"
+                style={{ background: "rgba(234,179,8,0.10)", border: "1px solid rgba(234,179,8,0.30)" }}
+              >
+                <span style={{ fontSize: 11, lineHeight: 1.6, fontFamily: "'DM Sans', sans-serif", color: "#854D0E" }}>
+                  建議重新上傳較清晰的照片，以獲得更準確的診斷結果。
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Delete button */}
@@ -1518,7 +1567,7 @@ function AnalysisRow({ item, onDelete, onColorClick, onImageClick, isNew }: {
 function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
   item: WardrobeItem;
   onDelete: (id: number) => void;
-  onImageClick?: () => void;
+  onImageClick?: (itemId: number) => void;
   isNew?: boolean;
 }) {
   const [deleting, setDeleting] = useState(false);
@@ -1539,7 +1588,7 @@ function WardrobeRow({ item, onDelete, onImageClick, isNew }: {
     >
       {/* Photo */}
       <button
-        onClick={isInactive ? undefined : onImageClick}
+        onClick={isInactive ? undefined : () => onImageClick?.(item.id)}
         disabled={isInactive}
         className="shrink-0 active:opacity-70 transition-opacity"
         style={{ width: 72, minHeight: 96, background: "#EDE4D8" }}
@@ -1661,15 +1710,16 @@ function ColorAnalysisScreen({ onBack, user, analyses, loadState, onReload, onAd
     setNewestId(analysis.id);
   }
 
-  const addBtn = (
-    <button
-      onClick={() => setAddOpen(true)}
-      className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 active:opacity-70 transition-opacity"
-      style={{ background: "linear-gradient(135deg, #C4856A 0%, #8B3A52 100%)" }}
-    >
-      <Plus size={18} color="#FDFAF6" strokeWidth={2} />
-    </button>
-  );
+    const showHeaderAddButton = analyses.length > 0 || loadState === "loading" || loadState === "error";
+    const addBtn = showHeaderAddButton ? (
+      <button
+        onClick={() => setAddOpen(true)}
+        className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 active:opacity-70 transition-opacity"
+        style={{ background: "linear-gradient(135deg, #C4856A 0%, #8B3A52 100%)" }}
+      >
+        <Plus size={18} color="#FDFAF6" strokeWidth={2} />
+      </button>
+    ) : undefined;
 
   return (
     <>
@@ -1697,7 +1747,7 @@ function ColorAnalysisScreen({ onBack, user, analyses, loadState, onReload, onAd
                 尚無分析紀錄
               </p>
               <p className="text-sm text-center leading-relaxed" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#8A6F5E" }}>
-                {user ? "點右上角 + 開始你的第一次色彩分析" : "請先登入，再進行個人色彩分析"}
+                  {user ? "使用下方按鈕開始你的第一次色彩分析" : "請先登入，再進行個人色彩分析"}
               </p>
             </div>
             <button
@@ -1760,8 +1810,8 @@ function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete
   onReload: () => void;
   onAdd: (item: WardrobeItem) => void;
   onDelete: (id: number) => void;
-  onTopImageClick: () => void;
-  onBottomImageClick: () => void;
+  onTopImageClick: (itemId: number) => void;
+  onBottomImageClick: (itemId: number) => void;
   onOpenRecycling: () => void;
 }) {
   const [filter, setFilter] = useState<"all" | "top" | "bottom">("all");
@@ -1782,6 +1832,7 @@ function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete
   const filteredItems = filter === "all" ? wardrobe : wardrobe.filter((item) => item.category === filter);
   const topCount = wardrobe.filter((item) => item.category === "top").length;
   const bottomCount = wardrobe.filter((item) => item.category === "bottom").length;
+  const showHeaderAddButton = filteredItems.length > 0 || loadState === "loading" || loadState === "error";
 
   return (
     <>
@@ -1834,13 +1885,16 @@ function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete
                 下著 {bottomCount > 0 && `(${bottomCount})`}
               </span>
             </button>
-            <button
-              onClick={() => openAddModal()}
-              className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 active:opacity-70 transition-opacity"
-              style={{ background: "linear-gradient(135deg, #8B3A52 0%, #6B2A40 100%)" }}
-            >
-              <Plus size={18} color="#FDFAF6" strokeWidth={2} />
-            </button>
+            {showHeaderAddButton && (
+              <button
+                onClick={() => openAddModal()}
+                aria-label="新增衣物"
+                className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 active:opacity-70 transition-opacity"
+                style={{ background: "linear-gradient(135deg, #8B3A52 0%, #6B2A40 100%)" }}
+              >
+                <Plus size={18} color="#FDFAF6" strokeWidth={2} />
+              </button>
+            )}
           </div>
 
           {/* Content area */}
@@ -1874,7 +1928,7 @@ function WardrobeScreen({ onBack, wardrobe, loadState, onReload, onAdd, onDelete
                     {wardrobe.length === 0 ? "衣櫥是空的" : `尚無${filter === "top" ? "上衣" : "下著"}`}
                   </p>
                   <p className="text-sm text-center leading-relaxed" style={{ fontFamily: "'DM Sans', sans-serif", fontWeight: 300, color: "#8A6F5E" }}>
-                    {filter === "all" ? "點右上角 + 開始新增服裝" : `點下方按鈕新增${filter === "top" ? "上衣" : "下著"}`}
+                      {filter === "all" ? "使用下方按鈕新增服裝" : `使用下方按鈕新增${filter === "top" ? "上衣" : "下著"}`}
                   </p>
                 </div>
                 <button
@@ -2052,17 +2106,18 @@ function GarmentSilhouette({ category, color }: { category: "top" | "bottom"; co
  * - 使用顏色距離演算法判斷顏色是否匹配
  * - 空狀態提示使用者新增對應資料
  */
-function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, initialMode, wardrobe }: {
+function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, initialMode, initialItemId, wardrobe }: {
   onBack: () => void;
   onStartTryOn: (topId: number, bottomId: number) => void;
   analyses: ColorAnalysis[];
   initialColor?: string;
   initialMode?: SuggestionMode;
+  initialItemId?: number;
   wardrobe: WardrobeItem[];
 }) {
   const [mode, setMode] = useState<SuggestionMode>(initialMode || (initialColor ? "personal" : "personal"));
   const [selectedColor, setSelectedColor] = useState<string | null>(initialColor || null);
-  const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(null);
+  const [selectedItem, setSelectedItem] = useState<WardrobeItem | null>(() => wardrobe.find((item) => item.id === initialItemId) ?? null);
 
   // 配色推薦 API 狀態
   const [recommendedPalettes, setRecommendedPalettes] = useState<string[]>([]);
@@ -2122,6 +2177,16 @@ function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, i
     setPreviewTop(item);
     setPreviewBottom(null);
     setSimulatedColor(null);
+  }
+
+  function clearOutfitPreview() {
+    setSelectedColor(null);
+    setSelectedItem(null);
+    setPreviewTop(null);
+    setPreviewBottom(null);
+    setSimulatedColor(null);
+    setRecommendedPalettes([]);
+    setMatchError("");
   }
 
   // 呼叫後端 API 取得配色建議
@@ -2248,19 +2313,21 @@ function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, i
             <div className="mb-2 min-w-0 shrink-0 xl:sticky xl:top-4 xl:self-start">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs tracking-widest uppercase" style={{ fontFamily: "'DM Sans', sans-serif", color: "#8A6F5E" }}>穿搭預覽</p>
-                <button onClick={() => { 
-                    if(mode === 'top') setPreviewBottom(null);
-                    else if(mode === 'bottom') setPreviewTop(null);
-                    else { setPreviewTop(null); setPreviewBottom(null); setSelectedItem(null); }
-                  }}
+                <button type="button" onClick={clearOutfitPreview}
                   className="text-xs px-3 py-1.5 rounded-full"
+                  title="清除目前色票、推薦結果與衣物選擇"
                   style={{ fontFamily: "'DM Sans', sans-serif", color: "#B87355", background: "rgba(184,115,85,0.1)" }}>
-                  清除搭配
+                  重新開始搭配
                 </button>
               </div>
               
-              <div className="relative flex h-72 w-full flex-col items-center justify-center overflow-hidden rounded-2xl shadow-inner md:h-96"
+              <div className="relative mx-auto aspect-[4/5] w-full max-w-[460px] overflow-hidden rounded-2xl shadow-inner"
                    style={{ background: "#EDE4D8", border: "1px solid rgba(44,24,16,0.08)" }}>
+                    <svg aria-hidden="true" viewBox="0 0 240 400" className="pointer-events-none absolute inset-0 z-0 m-auto h-[92%] w-[82%] opacity-45 drop-shadow-sm">
+                      <circle cx="120" cy="37" r="22" fill="#B8A99D" />
+                      <path d="M104 61h32l8 23 24 8 22 48-19 10-20-35-4 83H93l-4-83-20 35-19-10 22-48 24-8z" fill="#B8A99D" />
+                      <path d="M94 194h52l10 174h-32l-5-116-7 116H80z" fill="#B8A99D" />
+                    </svg>
                 
                     {(!previewTop && !previewBottom && !(mode === "personal" && selectedColor) && !(selectedItem && (mode === "top" || mode === "bottom"))) && (
                       <div className="flex flex-col items-center gap-2 opacity-50">
@@ -2269,33 +2336,18 @@ function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, i
                       </div>
                     )}
 
-                    {previewTop ? (
-                      <img 
-                        src={previewTop.imageUrl} 
-                        alt="上衣預覽"
-                        className="absolute top-4 w-[55%] object-contain z-10 drop-shadow-md transition-all duration-300" 
-                        style={{ maxHeight: '55%' }} 
-                      />
-                    ) : mode === "personal" && selectedColor ? (
-                      <div className="absolute top-4 z-10 h-[55%] w-[45%]"><GarmentSilhouette category="top" color={selectedColor} /></div>
-                    ) : mode === "bottom" && selectedItem ? (
-                      <div className="absolute top-4 z-10 h-[55%] w-[45%]"><GarmentSilhouette category="top" color={simulatedColor || recommendedPalettes[0] || "#C4856A"} /></div>
-                    ) : null}
+                    {(previewTop || (mode === "personal" && selectedColor) || (mode === "bottom" && selectedItem)) && <div className="absolute inset-x-0 top-[3%] z-10 flex h-[45%] items-center justify-center px-5">
+                      {previewTop ? <img src={previewTop.imageUrl} alt="上衣預覽" className="h-full w-[78%] object-contain drop-shadow-md transition-all duration-300" />
+                        : mode === "personal" && selectedColor ? <div className="h-full w-[48%]"><GarmentSilhouette category="top" color={selectedColor} /></div>
+                        : <div className="h-full w-[48%]"><GarmentSilhouette category="top" color={simulatedColor || recommendedPalettes[0] || "#C4856A"} /></div>}
+                    </div>}
                     
-                    {previewBottom ? (
-                      <img 
-                        src={previewBottom.imageUrl} 
-                        alt="下著預覽"
-                        className="absolute bottom-4 w-[50%] object-contain z-0 drop-shadow-sm transition-all duration-300" 
-                        style={{ maxHeight: '60%' }} 
-                      />
-                    ) : (mode === "personal" && selectedColor) || (mode === "top" && selectedItem) ? (
-                      <div className="absolute bottom-4 z-0 h-[60%] w-[40%]"><GarmentSilhouette category="bottom" color={simulatedColor || recommendedPalettes[0] || "#9B8274"} /></div>
-                    ) : null}
+                    {(previewBottom || (mode === "personal" && selectedColor) || (mode === "top" && selectedItem)) && <div className="absolute inset-x-0 bottom-[3%] z-0 flex h-[45%] items-center justify-center px-5">
+                      {previewBottom ? <img src={previewBottom.imageUrl} alt="下著預覽" className="h-full w-[72%] object-contain drop-shadow-sm transition-all duration-300" />
+                        : <div className="h-full w-[44%]"><GarmentSilhouette category="bottom" color={simulatedColor || recommendedPalettes[0] || "#9B8274"} /></div>}
+                    </div>}
 
-                    {((mode === "personal" && selectedColor && !selectedItem) || (selectedItem && !previewBottom && mode !== "bottom")) && (
-                      <span className="absolute bottom-2 right-3 z-20 rounded-full bg-white/75 px-2.5 py-1 text-[10px] text-[#8A6F5E]">搭配示意圖</span>
-                    )}
+                    <span className="absolute bottom-3 right-3 z-20 rounded-full border border-white/60 bg-white/80 px-2.5 py-1 text-[10px] font-medium text-[#715849] shadow-sm">比例示意・非實際試穿</span>
 
               </div>
               <button
@@ -2746,7 +2798,7 @@ function ColorSuggestionScreen({ onBack, onStartTryOn, analyses, initialColor, i
  * 【特別注意】
  * - 本專案採用單一檔案架構，所有組件都在此檔案中
  * - 沒有使用 React Router，畫面切換由狀態管理
- * - 數據儲存在記憶體中，重新整理會遺失 (未來可串接後端)
+ * - 衣櫥與個人色彩分析紀錄由後端載入；目前畫面狀態由 React 管理
  */
 export default function App() {
   const [screen, setScreen] = useState<Screen>("auth");
@@ -2760,6 +2812,7 @@ export default function App() {
   const wardrobeRequestVersion = useRef(0);
   const [selectedColor, setSelectedColor] = useState<string | undefined>(undefined);
   const [selectedMode, setSelectedMode] = useState<SuggestionMode | undefined>(undefined);
+  const [selectedWardrobeItemId, setSelectedWardrobeItemId] = useState<number | undefined>(undefined);
   const [tryOnSelection, setTryOnSelection] = useState<{ topId: number | null; bottomId: number | null }>({ topId: null, bottomId: null });
 
   useEffect(() => {
@@ -2835,7 +2888,8 @@ export default function App() {
         season: item.season,
         type: item.type,
         colors: item.colors,
-        description: item.description
+        description: item.description,
+        quality: item.quality ?? undefined
       }));
       setAnalyses(mappedAnalyses);
       setAnalysesLoadState("loaded");
@@ -2976,29 +3030,34 @@ export default function App() {
   }
 
   function handleColorClick(color: string) {
+    setSelectedWardrobeItemId(undefined);
     setSelectedColor(color);
     navigate("color-suggestion");
   }
 
   function navigateToColorSuggestion() {
+    setSelectedWardrobeItemId(undefined);
     setSelectedColor(undefined);
     setSelectedMode(undefined);
     navigate("color-suggestion");
   }
 
   function handleAnalysisImageClick() {
+    setSelectedWardrobeItemId(undefined);
     setSelectedColor(undefined);
     setSelectedMode("personal");
     navigate("color-suggestion");
   }
 
-  function handleTopImageClick() {
+  function handleTopImageClick(itemId: number) {
+    setSelectedWardrobeItemId(itemId);
     setSelectedColor(undefined);
     setSelectedMode("top");
     navigate("color-suggestion");
   }
 
-  function handleBottomImageClick() {
+  function handleBottomImageClick(itemId: number) {
+    setSelectedWardrobeItemId(itemId);
     setSelectedColor(undefined);
     setSelectedMode("bottom");
     navigate("color-suggestion");
@@ -3043,12 +3102,12 @@ export default function App() {
           )}
           {screen === "outfits" && (
             <motion.div key="outfits" className="absolute inset-0" {...slide}>
-              <OutfitCollectionScreen onBack={goBack} onTryOn={startTryOnWithOutfit} />
+              <OutfitCollectionScreen onBack={goBack} onTryOn={startTryOnWithOutfit} wardrobe={wardrobe} />
             </motion.div>
           )}
           {screen === "color-suggestion" && (
             <motion.div key="color-suggestion" className="absolute inset-0" {...slide}>
-              <ColorSuggestionScreen onBack={goBack} onStartTryOn={startTryOnWithOutfit} analyses={analyses} initialColor={selectedColor} initialMode={selectedMode} wardrobe={wardrobe.filter(item => !item.recyclingStatus || item.recyclingStatus === "active")} />
+              <ColorSuggestionScreen onBack={goBack} onStartTryOn={startTryOnWithOutfit} analyses={analyses} initialColor={selectedColor} initialMode={selectedMode} initialItemId={selectedWardrobeItemId} wardrobe={wardrobe.filter(item => !item.recyclingStatus || item.recyclingStatus === "active")} />
             </motion.div>
           )}
         </AnimatePresence>
